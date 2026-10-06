@@ -10,8 +10,9 @@
 import { isSymbolicKey, keys } from "./keys.js";
 import { createPainter, Terminal } from "./term.js";
 import { bodyHeight, renderFrame, shortPath } from "./render.js";
-import { enrichAll, makeProfileManager, nameValidationError } from "./profiles.js";
+import { enrichAll, makeProfileManager, nameValidationError, measureProfile } from "./profiles.js";
 import { launchPi } from "./launch.js";
+import { humanSize, timeLabel } from "./strutil.js";
 
 const MAX_NAME = 64;
 const NAME_CHARS = /[A-Za-z0-9._-]/;
@@ -485,6 +486,31 @@ export async function runTui({
     }
   };
   process.on("exit", () => term.teardown());
+
+  // Sizes/mtimes are measured in the background: the walk that produces them is
+  // by far the slowest part of loading (tens of thousands of lstat calls on a
+  // big profile). Fill them in after the first frame so startup stays instant.
+  const measureSizes = async () => {
+    for (const prof of state.profiles) {
+      if (exiting) return;
+      const measured = await measureProfile(prof.path);
+      if (exiting) return;
+      // Profiles may have changed underneath us; re-resolve by path.
+      const idx = state.profiles.findIndex((p) => p.path === prof.path);
+      if (idx < 0) continue;
+      const existing = state.profiles[idx];
+      if (existing.sizeBytes !== undefined) continue;
+      state.profiles[idx] = {
+        ...existing,
+        sizeBytes: measured.sizeBytes,
+        sizeLabel: humanSize(measured.sizeBytes),
+        mtimeMs: measured.mtimeMs,
+        mtimeLabel: timeLabel(measured.mtimeMs),
+      };
+      render();
+    }
+  };
+  void measureSizes();
 
   render();
 

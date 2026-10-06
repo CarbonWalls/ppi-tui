@@ -44,9 +44,29 @@ node ./bin/ppi-tui.js
 ```sh
 ppi-tui                       # interactive UI (needs a TTY)
 ppi-tui list                  # plain listing, no TTY needed
+ppi-tui create <name> [opts]  # create without the TUI
+ppi-tui delete <name> [--force]  # delete without the TUI
+ppi-tui set-default <name>    # set the default profile
 ppi-tui --version
 ppi-tui --help
 ```
+
+### Non-interactive profile management
+
+The subcommands mirror `ppi` itself, so anything scriptable there works here
+too:
+
+```sh
+ppi-tui create work                              # blank profile
+ppi-tui create work --from home                  # copy an existing profile
+ppi-tui create work --from-base                  # copy the stock pi config
+ppi-tui create work --own-auth --own-models      # copy, don't symlink
+ppi-tui delete work --force                      # no confirmation prompt
+ppi-tui set-default work
+```
+
+`--own-auth` / `--own-models` copy `auth.json` / `models.json` into the profile
+instead of symlinking them back to the stock pi config.
 
 The UI is a two-pane layout: profile list on the left, details for the selected
 profile on the right (model, provider, theme, whether auth/models are shared with
@@ -85,6 +105,28 @@ Input that arrives as one multi-keystroke chunk is treated as a paste and
 ignored in the list, and only its text is accepted in name fields. This keeps an
 accidental middle-click paste from confirming a delete or launching `pi`.
 
+### Sizes load in the background
+
+Byte sizes and modification times are the expensive part of loading a profile —
+a large one holds tens of thousands of files, and every file costs an `lstat`.
+The TUI renders immediately and fills those numbers in once measured, so a big
+profile set never blocks startup. The plain `list` subcommand skips them
+entirely (it prints a `—`), since a one-shot listing should stay fast.
+
+## Replacing `ppi` with `ppi-tui`
+
+`ppi-tui` can take over the global `ppi` command without uninstalling anything:
+point the `ppi` symlink at this project's entrypoint and keep `pi-profiles`
+installed (it's imported as a library). For example:
+
+```sh
+ln -sf /usr/local/lib/node_modules/pi-profiles/dist/src/cli/main.js /usr/local/bin/ppi.orig   # backup
+ln -sf /path/to/ppi-tui/bin/ppi-tui.js /usr/local/bin/ppi
+```
+
+Because every mutation delegates to `ppi`'s own `ProfileManager`, and the
+subcommands mirror `ppi`'s flags one-for-one, scripts calling `ppi` keep working.
+
 ## Project layout
 
 ```
@@ -97,7 +139,7 @@ src/launch.js         mirrors ppi's launch semantics
 src/render.js         pure renderFrame(state, ctx) -> string[]
 src/tui.js            pure reduce(state, key, api, height, meta) + runTui runtime
 src/cli.js            arg parsing, subcommands, non-TTY listing
-test/*.test.js        node --test suites (65 tests)
+test/*.test.js        node --test suites (87 tests)
 ```
 
 The app is built **pure-first** for testability: `renderFrame` and `reduce` are

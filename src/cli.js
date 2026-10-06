@@ -26,7 +26,16 @@ Usage:
   ppi-tui                                     Interactive profile browser (default)
   ppi-tui [use] <name> [-- <pi args...>]      Launch pi with <name> directly
   ppi-tui list                                Print profiles (no TUI required)
+  ppi-tui create <name> [options]             Create a profile without the TUI
+  ppi-tui delete <name> [--force]             Delete a profile without the TUI
+  ppi-tui set-default <name>                  Set the default profile
   ppi-tui help                                Show this message
+
+Create options:
+  --from <profile>                            Copy from an existing profile
+  --from-base                                 Copy from the stock pi config
+  --own-auth                                  Independent auth (copy, not symlink)
+  --own-models                                Independent models (copy, not symlink)
 
 In the TUI:
   arrows/j,k  move        enter / u  launch pi with the profile
@@ -43,15 +52,46 @@ Anything after a bare "--" is passed to pi when a profile is launched, e.g.
   ppi-tui use work -- -p "fix the bug"`);
 }
 
+function die(msg) {
+  console.error(msg);
+  console.error("Run `ppi-tui help` for usage.");
+  process.exitCode = 1;
+}
+
+/** Interactive y/N confirmation, mirroring ppi's own delete prompt. */
+function confirm(message) {
+  return new Promise((resolve) => {
+    let raw = "";
+    const onData = (chunk) => {
+      raw += chunk.toString("utf8");
+      // Resolve as soon as we see Enter, without echoing the prompt twice.
+      if (raw.includes("\r") || raw.includes("\n")) {
+        process.stdin.removeListener("data", onData);
+        if (process.stdin.isTTY) process.stdin.setRawMode(false);
+        process.stdin.pause();
+        resolve(raw.trim().toLowerCase().startsWith("y"));
+      }
+    };
+    process.stdout.write(message);
+    process.stdin.resume();
+    if (process.stdin.isTTY) process.stdin.setRawMode(true);
+    process.stdin.on("data", onData);
+  });
+}
+
+const MUTATING_SUBS = ["create", "delete", "set-default"];
+
 function parseArgs(args) {
   const dash = args.indexOf("--");
   const own = dash === -1 ? args : args.slice(0, dash);
   const piArgs = dash === -1 ? [] : args.slice(dash + 1);
 
-  const flags = { noColor: false, help: false, version: false, list: false };
+  const flags = { noColor: false, help: false, version: false, list: false, force: false };
+  const createOpts = { from: undefined, fromBase: false, ownAuth: false, ownModels: false };
   const positionals = [];
   let subcommand = null;
-  const SUBS = ["use", "list", "ls", "help"];
+  const SUBS = ["use", "list", "ls", "help", ...MUTATING_SUBS];
+  const CREATE_FLAGS = new Set(["--from", "--from-base", "--own-auth", "--own-models"]);
 
   for (let i = 0; i < own.length; i++) {
     const a = own[i];
@@ -59,12 +99,21 @@ function parseArgs(args) {
     else if (a === "-v" || a === "--version") flags.version = true;
     else if (a === "--no-color") flags.noColor = true;
     else if (a === "--list" || a === "--ls") flags.list = true;
-    else if (a.startsWith("-") && a !== "-") throw new Error(`Unknown option: ${a}`);
+    else if (a === "--force") flags.force = true;
+    else if (a === "--from") {
+      const next = own[i + 1];
+      if (!next || next.startsWith("-")) throw new Error("--from requires a profile name");
+      createOpts.from = next;
+      i++;
+    } else if (a === "--from-base") createOpts.fromBase = true;
+    else if (a === "--own-auth") createOpts.ownAuth = true;
+    else if (a === "--own-models") createOpts.ownModels = true;
+    else if (a.startsWith("-")) throw new Error(`Unknown option: ${a}`);
     else if (i === 0 && SUBS.includes(a)) subcommand = a === "ls" ? "list" : a;
     else positionals.push(a);
   }
 
-  return { flags, positionals, piArgs, subcommand };
+  return { flags, positionals, piArgs, subcommand, createOpts };
 }
 
 /** Plain-text listing for pipes and non-TTY use (no ANSI escapes). */
@@ -106,6 +155,83 @@ function printListing(profiles, { rootLabel }) {
   }
 }
 
+/** Create a profile without the TUI, mirroring `ppi create`. */
+function cmdCreate(pm, positionals, opts) {
+  const name = positionals[0];
+  if (!name) {
+    die("Usage: ppi-tui create <name> [--from <profile>] [--from-base] [--own-auth] [--own-models]");
+    return;
+  }
+  if (opts.from && opts.fromBase) {
+    die("Cannot use both --from and --from-base.");
+    return;
+  }
+  try {
+    pm.create(name, {
+      from: opts.from,
+      fromBase: opts.fromBase,
+      shareAuth: !opts.ownAuth,
+      shareModels: !opts.ownModels,
+    });
+    const source = opts.from
+      ? ` from "${opts.from}"`
+      : opts.fromBase
+        ? " from stock pi config"
+        : "";
+    console.log(`Created "${name}"${source} at ${pm.resolve(name).path}`);
+  } catch (err) {
+    die(err.message);
+  }
+}
+
+/** Delete a profile without the TUI, mirroring `ppi delete`. */
+async function cmdDelete(pm, positionals, flags) {
+  const name = positionals[0];
+  if (!name) {
+    die("Usage: ppi-tui delete <name> [--force]");
+    return;
+  }
+  let profile;
+  try {
+    profile = pm.resolve(name);
+  } catch (err) {
+    die(err.message);
+    return;
+  }
+  if (!flags.force) {
+    if (!process.stdin.isTTY) {
+      die(`Cannot confirm interactively. Use --force to delete non-interactively.`);
+      return;
+    }
+    const yes = await confirm(`Delete profile "${name}" at ${profile.path}? This cannot be undone. [y/N] `);
+    if (!yes) {
+      console.log("Aborted.");
+      return;
+    }
+  }
+  try {
+    pm.delete(name);
+    console.log(`Profile "${name}" deleted.`);
+  } catch (err) {
+    die(err.message);
+  }
+}
+
+/** Set the default profile without the TUI, mirroring `ppi set-default`. */
+function cmdSetDefault(pm, positionals) {
+  const name = positionals[0];
+  if (!name) {
+    die("Usage: ppi-tui set-default <name>");
+    return;
+  }
+  try {
+    pm.setDefault(name);
+    console.log(`Default profile set to "${name}".`);
+  } catch (err) {
+    die(err.message);
+  }
+}
+
 export async function main(argv) {
   let parsed;
   try {
@@ -117,7 +243,7 @@ export async function main(argv) {
     return;
   }
 
-  const { flags, positionals, piArgs, subcommand } = parsed;
+  const { flags, positionals, piArgs, subcommand, createOpts } = parsed;
 
   if (flags.help || subcommand === "help") {
     printHelp();
@@ -132,6 +258,11 @@ export async function main(argv) {
   const pm = makeProfileManager(ProfileManager);
   const currentDir = process.env.PI_CODING_AGENT_DIR || null;
 
+  // Non-interactive profile management, mirroring ppi's own subcommands.
+  if (subcommand === "create") return cmdCreate(pm, positionals, createOpts);
+  if (subcommand === "delete") return cmdDelete(pm, positionals, flags);
+  if (subcommand === "set-default") return cmdSetDefault(pm, positionals);
+
   // Explicit listing, or automatic fallback when there is no terminal.
   const wantList =
     flags.list ||
@@ -142,6 +273,9 @@ export async function main(argv) {
     // Imported lazily so the listing path stays cheap.
     const { enrichAll } = await import("./profiles.js");
     const profiles = enrichAll(pm, { currentDir });
+    // Sizes are deliberately not computed here: walking a large profile for its
+    // byte size costs tens of thousands of lstat calls and would dominate the
+    // run. Use the TUI to see sizes — they load in the background there.
     const { shortPath } = await import("./render.js");
     printListing(profiles, { rootLabel: shortPath(pm.piRoot) + "/profiles" });
     return;

@@ -8,9 +8,11 @@ import {
   enrichProfile,
   loadProfileManagerCtor,
   makeProfileManager,
+  measureProfile,
   nameValidationError,
   readSettings,
 } from "../src/profiles.js";
+import { humanSize } from "../src/strutil.js";
 
 // A throwaway pi root: this suite drives ppi's *real* ProfileManager, so it
 // must never touch the user's ~/.pi.
@@ -82,7 +84,7 @@ test("--from copies an existing profile and preserves its symlinks", () => {
   assert.ok(lstatSync(join(profilesDir, "copy", "auth.json")).isSymbolicLink());
 });
 
-test("enrichment reports counts, sizes, link status and settings", () => {
+test("enrichment reports counts, link status and settings (sizes deferred)", () => {
   const profiles = enrichAll(pm, { currentDir: null });
   const byName = Object.fromEntries(profiles.map((p) => [p.name, p]));
 
@@ -93,10 +95,9 @@ test("enrichment reports counts, sizes, link status and settings", () => {
   assert.equal(blank.models.kind, "shared");
   assert.equal(blank.counts.extensions, 0);
   assert.equal(blank.counts.sessions, 0);
-  // The stock auth.json is 200 KB, but a shared profile must not count the
-  // target's size — only the symlink itself.
-  assert.ok(blank.sizeBytes < 4096, `symlink targets not followed (got ${blank.sizeBytes})`);
-  assert.ok(/(bytes|B|KB)/.test(blank.sizeLabel));
+  // Sizes are measured lazily now, so they are absent until measured.
+  assert.equal(blank.sizeBytes, undefined);
+  assert.equal(blank.sizeLabel, "—");
 
   const base = byName.frombase;
   assert.equal(base.model, "demo-1");
@@ -104,11 +105,25 @@ test("enrichment reports counts, sizes, link status and settings", () => {
   assert.equal(base.theme, "dark");
   assert.equal(base.counts.skills, 1);
   assert.equal(base.counts.extensions, 1);
-  assert.ok(base.sizeBytes > 0);
 
   const own = byName.own;
   assert.equal(own.auth.kind, "own");
   assert.equal(own.models.kind, "shared");
+});
+
+test("measureProfile reports sizes without following symlinks", async () => {
+  const profiles = enrichAll(pm, { currentDir: null });
+  const byName = Object.fromEntries(profiles.map((p) => [p.name, p]));
+
+  const blank = await measureProfile(byName.blank.path);
+  // The stock auth.json is 200 KB, but a shared profile must not count the
+  // target's size — only the symlink itself.
+  assert.ok(blank.sizeBytes < 4096, `symlink targets not followed (got ${blank.sizeBytes})`);
+  assert.ok(/(bytes|B|KB)/.test(humanSize(blank.sizeBytes)));
+  assert.ok(blank.mtimeMs === undefined || typeof blank.mtimeMs === "number");
+
+  const base = await measureProfile(byName.frombase.path);
+  assert.ok(base.sizeBytes > 0);
 });
 
 test("enrichment flags the default and the running profile", () => {

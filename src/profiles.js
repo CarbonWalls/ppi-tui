@@ -166,8 +166,33 @@ function dirMtime(dir) {
 }
 
 /**
+ * Compute the byte size and mtime for one profile dir without blocking the UI.
+ *
+ * `dirSize` is by far the most expensive part of enrichment — a large profile
+ * can hold tens of thousands of files and every one of them costs an
+ * `lstatSync`. This runs the walk off the event loop and resolves later, so
+ * `list`/startup stay instant and the numbers fill in once ready.
+ */
+export function measureProfile(profilePath) {
+  return new Promise((resolve) => {
+    setImmediate(() => {
+      try {
+        resolve({ sizeBytes: dirSize(profilePath), mtimeMs: dirMtime(profilePath) });
+      } catch {
+        resolve({ sizeBytes: undefined, mtimeMs: undefined });
+      }
+    });
+  });
+}
+
+/**
  * Gather display details for one profile entry from `pm.list()`.
  * Returns `null` when the profile vanished (e.g. deleted in another shell).
+ *
+ * Sizes and mtimes are intentionally NOT computed here: walking a large
+ * profile for its byte size costs tens of thousands of `lstatSync` calls and
+ * dominates load time. Callers that want those numbers should follow up with
+ * `measureProfile()` per profile and patch the results in.
  */
 export function enrichProfile(entry, { agentDir, currentDir } = {}) {
   if (!entry || !existsSync(entry.path)) return null;
@@ -179,8 +204,8 @@ export function enrichProfile(entry, { agentDir, currentDir } = {}) {
   for (const d of KNOWN_COUNT_DIRS) counts[d] = countEntries(join(entry.path, d));
   counts.sessions = countFilesRecursive(join(entry.path, "sessions"));
 
-  const sizeBytes = dirSize(entry.path);
-  const mtimeMs = dirMtime(entry.path);
+  const sizeBytes = undefined;
+  const mtimeMs = undefined;
   const auth = symlinkInfo(entry.path, "auth.json");
   const models = symlinkInfo(entry.path, "models.json");
 
