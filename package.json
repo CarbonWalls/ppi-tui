@@ -1,0 +1,36 @@
+{
+  "name": "ppi-tui",
+  "version": "0.1.0",
+  "description": "Interactive terminal UI for ppi (pi-profiles), the pi configuration profile manager",
+  "type": "module",
+  "license": "MIT",
+  "keywords": [
+    "pi-package",
+    "pi",
+    "ppi",
+    "pi-profiles",
+    "tui"
+  ],
+  "bin": {
+    "ppi-tui": "./bin/ppi-tui.js"
+  },
+  "files": [
+    "bin/",
+    "src/"
+  ],
+  "scripts": {
+    "start": "node ./bin/ppi-tui.js",
+    "test": "node --test test/"
+  },
+  "peerDependencies": {
+    "pi-profiles": ">=0.1.0"
+  },
+  "peerDependenciesMeta": {
+    "pi-profiles": {
+      "optional": false
+    }
+  },
+  "engines": {
+    "node": ">=20"
+  }
+}

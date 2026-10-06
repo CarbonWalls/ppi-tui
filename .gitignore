@@ -1,0 +1,3 @@
+# pi-profiles is resolved from the global npm install at runtime; the local
+# symlink is only a dev convenience on this machine.
+node_modules/
