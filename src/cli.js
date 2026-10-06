@@ -3,12 +3,27 @@
 
 import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
-import { dirname, join } from "node:path";
+import { dirname, join, basename } from "node:path";
 import { loadProfileManagerCtor, makeProfileManager } from "./profiles.js";
 import { launchPi } from "./launch.js";
 import { runTui } from "./tui.js";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
+
+/**
+ * The name this tool was invoked as.
+ *
+ * The same binary may be reached as `ppi` (the global symlink), `ppi-tui`
+ * (the package bin) or `node ./bin/ppi-tui.js`. Help and usage strings should
+ * always show the name the user actually typed, so they can copy-paste the
+ * examples straight back into the shell.
+ */
+function programName() {
+  const arg = process.argv[1] || "";
+  const base = basename(arg);
+  if (base && base !== "node") return base.replace(/\.m?js$/i, "");
+  return "ppi";
+}
 
 function packageVersion() {
   try {
@@ -20,16 +35,17 @@ function packageVersion() {
 
 function printHelp() {
   const v = packageVersion();
-  console.log(`ppi-tui ${v} — interactive profile manager for ppi (pi-profiles)
+  const p = programName();
+  console.log(`${p} ${v} — interactive profile manager for ppi (pi-profiles)
 
 Usage:
-  ppi-tui                                     Interactive profile browser (default)
-  ppi-tui [use] <name> [-- <pi args...>]      Launch pi with <name> directly
-  ppi-tui list                                Print profiles (no TUI required)
-  ppi-tui create <name> [options]             Create a profile without the TUI
-  ppi-tui delete <name> [--force]             Delete a profile without the TUI
-  ppi-tui set-default <name>                  Set the default profile
-  ppi-tui help                                Show this message
+  ${p}                                     Interactive profile browser (default)
+  ${p} [use] <name> [-- <pi args...>]      Launch pi with <name> directly
+  ${p} list                                Print profiles (no TUI required)
+  ${p} create <name> [options]             Create a profile without the TUI
+  ${p} delete <name> [--force]             Delete a profile without the TUI
+  ${p} set-default <name>                  Set the default profile
+  ${p} help                                Show this message
 
 Create options:
   --from <profile>                            Copy from an existing profile
@@ -49,12 +65,12 @@ Options:
   --version,-v Print the version
 
 Anything after a bare "--" is passed to pi when a profile is launched, e.g.
-  ppi-tui use work -- -p "fix the bug"`);
+  ${p} use work -- -p "fix the bug"`);
 }
 
 function die(msg) {
   console.error(msg);
-  console.error("Run `ppi-tui help` for usage.");
+  console.error("Run `" + programName() + " help` for usage.");
   process.exitCode = 1;
 }
 
@@ -159,7 +175,11 @@ function printListing(profiles, { rootLabel }) {
 function cmdCreate(pm, positionals, opts) {
   const name = positionals[0];
   if (!name) {
-    die("Usage: ppi-tui create <name> [--from <profile>] [--from-base] [--own-auth] [--own-models]");
+    die(
+      "Usage: " +
+        programName() +
+        " create <name> [--from <profile>] [--from-base] [--own-auth] [--own-models]",
+    );
     return;
   }
   if (opts.from && opts.fromBase) {
@@ -188,7 +208,7 @@ function cmdCreate(pm, positionals, opts) {
 async function cmdDelete(pm, positionals, flags) {
   const name = positionals[0];
   if (!name) {
-    die("Usage: ppi-tui delete <name> [--force]");
+    die("Usage: " + programName() + " delete <name> [--force]");
     return;
   }
   let profile;
@@ -221,7 +241,7 @@ async function cmdDelete(pm, positionals, flags) {
 function cmdSetDefault(pm, positionals) {
   const name = positionals[0];
   if (!name) {
-    die("Usage: ppi-tui set-default <name>");
+    die("Usage: " + programName() + " set-default <name>");
     return;
   }
   try {
@@ -237,9 +257,7 @@ export async function main(argv) {
   try {
     parsed = parseArgs(argv);
   } catch (err) {
-    console.error(err.message);
-    console.error("Run `ppi-tui help` for usage.");
-    process.exitCode = 1;
+    die(err.message);
     return;
   }
 
@@ -250,7 +268,7 @@ export async function main(argv) {
     return;
   }
   if (flags.version) {
-    console.log(`ppi-tui ${packageVersion()}`.trim());
+    console.log((programName() + " " + packageVersion()).trim());
     return;
   }
 
@@ -281,7 +299,7 @@ export async function main(argv) {
     return;
   }
 
-  // Direct launch: `ppi-tui use work` or `ppi-tui work`.
+  // Direct launch: `ppi use work` or `ppi work`.
   const directName = subcommand === "use" ? positionals[0] : positionals[0];
   if (directName) {
     try {

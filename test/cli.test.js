@@ -6,7 +6,7 @@
 
 import { test, before, after } from "node:test";
 import assert from "node:assert/strict";
-import { mkdtempSync, mkdirSync, writeFileSync, rmSync, readFileSync, existsSync } from "node:fs";
+import { mkdtempSync, mkdirSync, writeFileSync, rmSync, readFileSync, existsSync, symlinkSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, dirname } from "node:path";
 import { spawn } from "node:child_process";
@@ -190,14 +190,39 @@ test("list prints profiles without a TTY", async () => {
   assert.ok(!/\x1b\[/.test(out), "no ANSI escapes in the plain listing");
 });
 
-test("help lists the subcommands", async () => {
+test("programName reflects how the binary was invoked", async () => {
+  // Launched through a symlink named `demo`, help must say `demo`, never a
+  // hardcoded `ppi-tui`. This is the actual bug: help advertised a command that
+  // did not exist because the global symlink renamed the binary to `ppi`.
+  const link = join(root, "demo");
+  const bin = join(dirname(fileURLToPath(import.meta.url)), "..", "bin", "ppi-tui.js");
+  symlinkSync(bin, link);
+  try {
+    const child = spawn(process.execPath, [link, "--help"], {
+      env: { ...process.env, PPI_PI_ROOT: root, PI_CODING_AGENT_DIR: "" },
+      stdio: ["ignore", "pipe", "pipe"],
+    });
+    let out = "";
+    child.stdout.on("data", (d) => (out += d));
+    await new Promise((resolve) => child.on("close", resolve));
+    assert.match(out, /^demo \d+\.\d+\.\d+ — /m);
+    assert.ok(!/ppi-tui/.test(out), "help must not name the old hardcoded command");
+  } finally {
+    rmSync(link, { force: true });
+  }
+});
+
+test("help lists the subcommands and uses the invoked program name", async () => {
   const { out } = await run("--help");
-  assert.match(out, /ppi-tui/);
   assert.match(out, /create <name>/);
   assert.match(out, /--from <profile>/);
   assert.match(out, /--from-base/);
   assert.match(out, /delete <name>/);
   assert.match(out, /set-default <name>/);
+  // Help must describe the command the user actually typed, not a hardcoded
+  // name. The subprocess is launched as bin/ppi-tui.js, so that is the name.
+  assert.match(out, /^ppi-tui \d+\.\d+\.\d+ — /m);
+  assert.ok(!/^ppi /m.test(out), "no stale `ppi ` usage lines");
 });
 
 test("version prints the package version", async () => {
