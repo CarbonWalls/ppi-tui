@@ -133,30 +133,6 @@ function countFilesRecursive(dir, depth = 0) {
   return n;
 }
 
-function dirSize(dir, depth = 0) {
-  if (!existsSync(dir) || depth > 6) return 0;
-  let total = 0;
-  try {
-    for (const entry of readdirSync(dir, { withFileTypes: true })) {
-      if (entry.name.startsWith(".")) continue;
-      const p = join(dir, entry.name);
-      // lstat on the entry itself: symlinks count as their link size only, so
-      // auth/models shared with the base profile are not double-counted.
-      const st = lstatSync(p);
-      if (st.isSymbolicLink()) {
-        total += st.size;
-      } else if (st.isDirectory()) {
-        total += dirSize(p, depth + 1);
-      } else {
-        total += st.size;
-      }
-    }
-  } catch {
-    /* unreadable */
-  }
-  return total;
-}
-
 function dirMtime(dir) {
   try {
     return statSync(dir).mtimeMs;
@@ -166,23 +142,49 @@ function dirMtime(dir) {
 }
 
 /**
- * Compute the byte size and mtime for one profile dir without blocking the UI.
+ * Compute the byte size and mtime for one profile dir *cooperatively*.
  *
  * `dirSize` is by far the most expensive part of enrichment — a large profile
  * can hold tens of thousands of files and every one of them costs an
- * `lstatSync`. This runs the walk off the event loop and resolves later, so
- * `list`/startup stay instant and the numbers fill in once ready.
+ * `lstatSync`. Doing that walk synchronously would freeze the UI for several
+ * seconds (keystrokes and renders stop), so this version walks one directory
+ * per tick and yields back to the event loop between them. The TUI stays
+ * responsive the whole time and the number fills in once the walk finishes.
+ *
+ * `shouldStop` is checked between directories so quitting cancels the walk.
  */
-export function measureProfile(profilePath) {
-  return new Promise((resolve) => {
-    setImmediate(() => {
-      try {
-        resolve({ sizeBytes: dirSize(profilePath), mtimeMs: dirMtime(profilePath) });
-      } catch {
-        resolve({ sizeBytes: undefined, mtimeMs: undefined });
+export async function measureProfile(profilePath, { shouldStop } = {}) {
+  const stopped = () => (typeof shouldStop === "function" ? shouldStop() : false);
+  let total = 0;
+  const stack = [[profilePath, 0]];
+
+  while (stack.length > 0) {
+    const [dir, depth] = stack.pop();
+    if (depth > 6) continue;
+    if (stopped()) return { sizeBytes: undefined, mtimeMs: undefined, aborted: true };
+    try {
+      for (const entry of readdirSync(dir, { withFileTypes: true })) {
+        if (entry.name.startsWith(".")) continue;
+        const p = join(dir, entry.name);
+        // lstat on the entry itself: symlinks count as their link size only, so
+        // auth/models shared with the base profile are not double-counted.
+        const st = lstatSync(p);
+        if (st.isSymbolicLink()) {
+          total += st.size;
+        } else if (st.isDirectory()) {
+          stack.push([p, depth + 1]);
+        } else {
+          total += st.size;
+        }
       }
-    });
-  });
+    } catch {
+      /* unreadable */
+    }
+    // Yield to the event loop so input and renders keep flowing.
+    await new Promise((r) => setImmediate(r));
+  }
+
+  return { sizeBytes: total, mtimeMs: dirMtime(profilePath), aborted: false };
 }
 
 /**

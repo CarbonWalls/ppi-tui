@@ -108,6 +108,15 @@ export class Terminal {
     }
     for (const cb of this.resizers) this.out.removeListener("resize", cb);
     this.resizers.clear();
+    // A TTY stdout keeps the process alive for as long as it holds listeners.
+    // Drop our resize hook and let the stream go so `q` actually exits.
+    if (typeof this.out.unref === "function") {
+      try {
+        this.out.unref();
+      } catch {
+        /* already unrefd */
+      }
+    }
   }
 
   /** Move cursor to row/col (1-based). */

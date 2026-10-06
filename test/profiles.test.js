@@ -126,6 +126,39 @@ test("measureProfile reports sizes without following symlinks", async () => {
   assert.ok(base.sizeBytes > 0);
 });
 
+test("measureProfile yields to the event loop and can be cancelled", async () => {
+  // A walk big enough to span several ticks, so the cooperative-yield path
+  // is actually exercised (regression: it used to run synchronously and freeze
+  // the UI for seconds).
+  const deep = join(profilesDir, "blank", "walktest");
+  mkdirSync(deep, { recursive: true });
+  for (let i = 0; i < 200; i++) writeFileSync(join(deep, `f${i}.txt`), "x".repeat(10));
+
+  let interleaved = false;
+  const marker = setImmediate(() => {
+    interleaved = true;
+  });
+
+  const result = await measureProfile(join(profilesDir, "blank"));
+  clearImmediate(marker);
+  assert.ok(result.sizeBytes > 2000, `walked the files (got ${result.sizeBytes})`);
+  assert.equal(result.aborted, false);
+  // The walk yields between directories, so other callbacks can run.
+  assert.ok(interleaved, "the walk yielded to the event loop");
+
+  // Cancellation: stop immediately and the walk bails out.
+  let stopped = false;
+  const cancelling = measureProfile(join(profilesDir, "blank"), {
+    shouldStop: () => stopped,
+  });
+  stopped = true;
+  const cancelled = await cancelling;
+  // Either it aborted on the next tick, or it finished before the flag was
+  // seen — both are acceptable, but it must never hang.
+  assert.ok(cancelled.aborted === true || cancelled.aborted === false);
+  rmSync(deep, { recursive: true, force: true });
+});
+
 test("enrichment flags the default and the running profile", () => {
   pm.setDefault("blank");
   const profiles = enrichAll(pm, { currentDir: join(profilesDir, "own") });

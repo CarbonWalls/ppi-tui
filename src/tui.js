@@ -487,14 +487,24 @@ export async function runTui({
   };
   process.on("exit", () => term.teardown());
 
+  // A pending size measurement keeps a `setImmediate` chain alive, which would
+  // stop the process from exiting after we leave the screen. `shouldStop`
+  // cancels the walk, and this lets the event loop drain once nothing else is
+  // pending. Used by the quit/launch paths below.
+  const stopMeasuring = () => {
+    exiting = true;
+  };
+
   // Sizes/mtimes are measured in the background: the walk that produces them is
   // by far the slowest part of loading (tens of thousands of lstat calls on a
-  // big profile). Fill them in after the first frame so startup stays instant.
+  // big profile). It yields to the event loop between directories, so it never
+  // freezes the UI, and it is cancelled the moment we exit so quitting is
+  // immediate even mid-walk.
   const measureSizes = async () => {
     for (const prof of state.profiles) {
       if (exiting) return;
-      const measured = await measureProfile(prof.path);
-      if (exiting) return;
+      const measured = await measureProfile(prof.path, { shouldStop: () => exiting });
+      if (exiting || measured.aborted) return;
       // Profiles may have changed underneath us; re-resolve by path.
       const idx = state.profiles.findIndex((p) => p.path === prof.path);
       if (idx < 0) continue;

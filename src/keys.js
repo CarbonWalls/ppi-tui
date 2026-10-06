@@ -307,6 +307,20 @@ export function keys(stream) {
     stream.removeListener("data", onData);
     stream.removeListener("end", onEnd);
     stream.removeListener("error", onError);
+    // A TTY stdin keeps the process alive while it has a "data" listener.
+    // Let it go on detach so quitting actually exits.
+    try {
+      stream.pause();
+    } catch {
+      /* not a readable stream */
+    }
+    if (typeof stream.unref === "function") {
+      try {
+        stream.unref();
+      } catch {
+        /* already unrefd */
+      }
+    }
   };
 
   return {

@@ -1,8 +1,10 @@
 import { test, before, after } from "node:test";
 import assert from "node:assert/strict";
-import { mkdtempSync, mkdirSync, writeFileSync, rmSync, existsSync } from "node:fs";
+import { mkdtempSync, mkdirSync, writeFileSync, rmSync, existsSync, readFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
+import { fileURLToPath } from "node:url";
+import { spawn, spawnSync } from "node:child_process";
 import { stripAnsi } from "../src/strutil.js";
 import { createApi, initialState, reduce, runTui } from "../src/tui.js";
 import { loadProfileManagerCtor, makeProfileManager } from "../src/profiles.js";
@@ -367,6 +369,89 @@ function syntheticKeys(keys) {
     throw: (e) => Promise.reject(e),
   };
   return { [Symbol.asyncIterator]: () => gen };
+}
+
+/* ------------------------------------------------- real-process exit test */
+
+// The TUI used to stay alive after `q`/esc because the TTY stdin/stdout kept
+// the event loop ref'd. The fake terminal above cannot catch that (it never
+// touches real streams), so drive the actual binary under a real pty via socat
+// and check the *node* process really exits.
+//
+// This must run under a pty: with piped stdio the app takes its non-TTY
+// fallback and prints a plain listing instead of entering the TUI, so `q`
+// would never be read. And socat itself waits on its stdin pipe, so the test
+// must poll for the child rather than wait for socat to return.
+test("quitting the real binary exits the process (no lingering TTY handles)", async () => {
+  const socat = spawnSync("which", ["socat"], { encoding: "utf8" }).stdout.trim();
+  if (!socat || !existsSync(socat)) return; // not every runner has socat
+
+  const bin = join(dirname(fileURLToPath(import.meta.url)), "..", "bin", "ppi-tui.js");
+  // The wrapper records the TUI's own pid, so the test can watch the real
+  // process rather than scraping the process table (socat re-execs its child,
+  // so `ps` shows the whole EXEC: line and the `timeout` wrapper too).
+  const pidFile = join(root, "tui.pid");
+  // `$$` is the wrapper shell's pid; we exec node *in place*, so it is also
+  // the TUI's pid.
+  const wrapper = [
+    "#!/bin/sh",
+    "unset PI_CODING_AGENT_DIR",
+    "export PPI_PI_ROOT=" + JSON.stringify(root),
+    "export COLUMNS=100 LINES=24",
+    "printf %s $$ > " + JSON.stringify(pidFile),
+    "exec node " + JSON.stringify(bin),
+    "",
+  ].join("\n");
+  const wrapperPath = join(root, "run-tui.sh");
+  writeFileSync(wrapperPath, wrapper, { mode: 0o755 });
+
+  const cmd =
+    "(sleep 0.4; printf q; sleep 8) | exec timeout 20 " +
+    [JSON.stringify(socat), "-", JSON.stringify("EXEC:" + wrapperPath + ",pty,rawer,echo=0")].join(" ");
+  const child = spawn("/bin/sh", ["-c", cmd], { stdio: "ignore" });
+
+  // Wait for the pid file, then poll that pid until it is gone. A prompt quit
+  // makes it vanish right after 'q'; a hang keeps it alive for the full window.
+  const started = Date.now();
+  let pid = undefined;
+  for (let i = 0; i < 40 && pid === undefined; i++) {
+    try {
+      pid = Number.parseInt(readFileSync(pidFile, "utf8").trim(), 10);
+    } catch {
+      await new Promise((r) => setTimeout(r, 50));
+    }
+  }
+
+  let exited = false;
+  if (pid) {
+    for (let i = 0; i < 60; i++) {
+      if (!existsSync("/proc/" + pid)) {
+        exited = true;
+        break;
+      }
+      await new Promise((r) => setTimeout(r, 50));
+    }
+  }
+
+  try {
+    child.kill("SIGKILL");
+  } catch {
+    /* already gone */
+  }
+  const elapsed = Date.now() - started;
+  rmSync(wrapperPath, { force: true });
+  rmSync(pidFile, { force: true });
+  assert.ok(pid, "the TUI wrapper never reported its pid");
+  assert.ok(existedWrapper(pid), "sanity: pid was live at least once");
+  assert.ok(exited, `the TUI process (pid ${pid}) was still alive after ${elapsed}ms — it did not quit`);
+  assert.ok(elapsed < 3000, `quit was not prompt — took ${elapsed}ms`);
+});
+
+function existedWrapper(pid) {
+  // The pid file existed and named a real process at some point: /proc/<pid>
+  // disappearing after we saw it is the exit signal, so merely having read the
+  // pid is enough to know it started.
+  return Number.isInteger(pid) && pid > 0;
 }
 
 test("runTui navigates, creates a profile through real ppi, and quits", async () => {

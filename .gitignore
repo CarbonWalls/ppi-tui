@@ -1,3 +1,9 @@
 # pi-profiles is resolved from the global npm install at runtime; the local
 # symlink is only a dev convenience on this machine.
 node_modules/
+
+# Tests spin up a throwaway pi root and may drop fixtures next to the project;
+# they must never be committed.
+profiles/
+tui.pid
+*.pid
