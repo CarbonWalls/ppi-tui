@@ -294,3 +294,28 @@ test("unknown extension action still reports a clear error", async () => {
   const { err } = await run("ext", "boom");
   assert.match(err, /Unknown extensions action/);
 });
+
+// ------------------------------------------------------------------
+// `setup` subcommand
+// ------------------------------------------------------------------
+
+test("setup links pi-profiles and creates the ppi shim (PPI_TUI_ROOT override)", async () => {
+  const root2 = join(root, "setup-root");
+  mkdirSync(join(root2, "bin"), { recursive: true });
+  writeFileSync(join(root2, "bin", "ppi-tui.js"), "#!/usr/bin/env node\n");
+  const bin2 = join(root, "setup-bin");
+  const child = spawn(process.execPath, [BIN, "setup", "--bin", bin2], {
+    env: { ...process.env, PPI_PI_ROOT: root, PPI_TUI_ROOT: root2, PI_CODING_AGENT_DIR: "" },
+    stdio: ["pipe", "pipe", "pipe"],
+  });
+  let out = "";
+  child.stdout.on("data", (d) => (out += d));
+  const code = await new Promise((resolve) => child.on("close", resolve));
+  assert.equal(code, 0);
+  assert.match(out, /pi-profiles/);
+  assert.match(out, /Created the `ppi` command/);
+  assert.ok(existsSync(join(root2, "node_modules", "pi-profiles")), "linked into temp project root");
+  assert.ok(existsSync(join(bin2, "ppi")), "ppi shim created in temp bin dir");
+  rmSync(root2, { recursive: true, force: true });
+  rmSync(bin2, { recursive: true, force: true });
+});

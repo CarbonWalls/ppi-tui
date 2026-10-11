@@ -487,6 +487,23 @@ export async function runTui({
   };
   process.on("exit", () => term.teardown());
 
+  // A signal (Ctrl+C, kill, SIGHUP, ...) bypasses the `finally` below, so a
+  // plain `process.exit(...)` via the 'exit' handler above is what restores
+  // the terminal. Without this, dying on a signal leaves the screen stuck in
+  // raw mode + mouse reporting — the "random letters as I move the mouse"
+  // symptom — even though the process is gone.
+  for (const [sig, code] of [
+    ["SIGINT", 130],
+    ["SIGTERM", 143],
+    ["SIGHUP", 129],
+    ["SIGQUIT", 131],
+  ]) {
+    process.on(sig, () => {
+      term.teardown(); // idempotent with the 'exit' handler
+      process.exit(code);
+    });
+  }
+
   // A pending size measurement keeps a `setImmediate` chain alive, which would
   // stop the process from exiting after we leave the screen. `shouldStop`
   // cancels the walk, and this lets the event loop drain once nothing else is

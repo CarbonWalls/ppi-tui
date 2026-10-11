@@ -23,21 +23,38 @@ the paths `ppi` itself uses.
 
 ## Install
 
-`ppi-tui` expects `pi-profiles` to be resolvable. If you run `ppi` globally, the
-package is already at your global npm root; symlink it into this project (or any
-dir you run from):
+`pi-profiles` is a peer dependency; npm 7+ installs peers automatically for a
+**global install (recommended)**:
 
 ```sh
-npm link pi-profiles        # if pi-profiles exposes a link target
-# or, without touching the global package:
-mkdir -p node_modules && ln -s "$(npm root -g)/pi-profiles" node_modules/pi-profiles
+npm install -g git+https://github.com/CarbonWalls/ppi-tui.git
+ppi setup          # link pi-profiles (if needed) + make this tool the `ppi` command
+ppi --version      # confirm
 ```
 
-Then run it in place:
+The one command `ppi setup` wires everything: it symlinks `pi-profiles` into
+place if it's missing, and points the global `ppi` command at ppi-tui (backing
+up any previous `ppi` to `ppi.orig.bak`). It's idempotent and never destroys
+your existing install.
+
+### From a clone (development)
 
 ```sh
-node ./bin/ppi-tui.js
+git clone git@github.com:CarbonWalls/ppi-tui.git && cd ppi-tui
+npm run setup          # same as `ppi setup`: link pi-profiles + create `ppi`
+# or, deps only (no global `ppi` shim):
+node ./bin/ppi-tui.js setup --no-shim
+
+export PPI_PI_ROOT=~/.pi   # normal
+node ./bin/ppi-tui.js      # run in place, no install
 ```
+
+`ppi setup` flags: `--bin <dir>` to choose the bin dir (default: `npm bin -g`),
+and `--no-shim` to skip creating the `ppi` command.
+
+The load order falls back to global npm roots automatically, so `ppi-tui` can
+run from anywhere once pi-profiles is installed globally — the `setup` steps
+are just to remove friction on a bare machine / take over the `ppi` name.
 
 ## Usage
 
@@ -152,17 +169,22 @@ entirely (it prints a `—`), since a one-shot listing should stay fast.
 
 ## Replacing `ppi` with `ppi-tui`
 
-`ppi-tui` can take over the global `ppi` command without uninstalling anything:
-point the `ppi` symlink at this project's entrypoint and keep `pi-profiles`
-installed (it's imported as a library). For example:
+`ppi-tui` is designed to *be* `ppi`. Because the original `pi-profiles` package
+also ships a `ppi` bin, ppi-tui never declares a conflicting `ppi` in
+`package.json`; instead `ppi setup` creates the `ppi` command for you:
 
 ```sh
-ln -sf /usr/local/lib/node_modules/pi-profiles/dist/src/cli/main.js /usr/local/bin/ppi.orig   # backup
-ln -sf /path/to/ppi-tui/bin/ppi-tui.js /usr/local/bin/ppi
+ppi setup
 ```
 
-Because every mutation delegates to `ppi`'s own `ProfileManager`, and the
-subcommands mirror `ppi`'s flags one-for-one, scripts calling `ppi` keep working.
+It points the global `ppi` at ppi-tui's entrypoint and renames any existing
+`ppi` to `ppi.orig.bak` (so the original pi-profiles CLI is one command away if
+you ever want it back). Because every mutation delegates to `ppi`'s own
+`ProfileManager`, and the subcommands mirror `ppi`'s flags one-for-one, scripts
+calling `ppi` keep working.
+
+> `ppi setup` never autopruns on install — the choice to take over the `ppi`
+> name is always explicit.
 
 ## Project layout
 
@@ -173,11 +195,12 @@ src/keys.js           raw-mode key parsing, paste detection
 src/term.js           terminal wrapper + colour painter
 src/profiles.js       ProfileManager loader + read-only enrichment
 src/extensions.js     shared-npm package management across all profiles
+src/setup.js          one-command setup (link pi-profiles + ppi shim)
 src/launch.js         mirrors ppi's launch semantics
 src/render.js         pure renderFrame(state, ctx) -> string[]
 src/tui.js            pure reduce(state, key, api, height, meta) + runTui runtime
 src/cli.js            arg parsing, subcommands, non-TTY listing
-test/*.test.js        node --test suites (105 tests)
+test/*.test.js        node --test suites (113 tests)
 ```
 
 The app is built **pure-first** for testability: `renderFrame` and `reduce` are

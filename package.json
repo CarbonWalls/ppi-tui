@@ -20,6 +20,7 @@
   ],
   "scripts": {
     "start": "node ./bin/ppi-tui.js",
+    "setup": "node ./bin/ppi-tui.js setup",
     "test": "node --test 'test/*.test.js'"
   },
   "peerDependencies": {

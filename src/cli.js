@@ -16,6 +16,7 @@ import {
   sharedNpmDir,
   updateExtensionsForAll,
 } from "./extensions.js";
+import { defaultBinDir, setup } from "./setup.js";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 
@@ -58,6 +59,7 @@ Usage:
   ${p} extensions install <source>         Install a package into every profile (shared)
   ${p} extensions update [<source>]        Update packages in every profile (shared)
   ${p} extensions remove <source>          Remove a package from every profile
+  ${p} setup                               Install deps + make this tool the 'ppi' command
   ${p} help                                Show this message
 
 Short aliases: ext | x for extensions; i/add, u/up, l/ls, rm/un for actions.
@@ -120,11 +122,11 @@ function parseArgs(args) {
   const own = dash === -1 ? args : args.slice(0, dash);
   const piArgs = dash === -1 ? [] : args.slice(dash + 1);
 
-  const flags = { noColor: false, help: false, version: false, list: false, force: false };
+  const flags = { noColor: false, help: false, version: false, list: false, force: false, binDir: undefined, noShim: false };
   const createOpts = { from: undefined, fromBase: false, ownAuth: false, ownModels: false };
   const positionals = [];
   let subcommand = null;
-  const SUBS = ["use", "list", "ls", "help", ...MUTATING_SUBS, "extensions", "ext", "x"];
+  const SUBS = ["use", "list", "ls", "help", ...MUTATING_SUBS, "extensions", "ext", "x" , "setup"];
   const CREATE_FLAGS = new Set(["--from", "--from-base", "--own-auth", "--own-models"]);
 
   for (let i = 0; i < own.length; i++) {
@@ -134,6 +136,12 @@ function parseArgs(args) {
     else if (a === "--no-color") flags.noColor = true;
     else if (a === "--list" || a === "--ls") flags.list = true;
     else if (a === "--force") flags.force = true;
+    else if (a === "--bin") {
+      const next = own[i + 1];
+      if (!next || next.startsWith("-")) throw new Error("--bin requires a directory");
+      flags.binDir = next;
+      i++;
+    } else if (a === "--no-shim" || a === "--no-ppi") flags.noShim = true;
     else if (a === "--from") {
       const next = own[i + 1];
       if (!next || next.startsWith("-")) throw new Error("--from requires a profile name");
@@ -380,6 +388,56 @@ async function cmdExtensions(pm, positionals) {
   }
 }
 
+/* ------------------------------------------------------------------ *
+ * setup — make a fresh clone (or global install) runnable
+ * ------------------------------------------------------------------ */
+
+function printSetupResult(r) {
+  const pi = r.pi;
+  if (pi.status === "error") {
+    console.error(pi.error);
+    console.error("Run `npm install -g pi-profiles` first, then try `ppi setup` again.");
+    process.exitCode = 1;
+    return;
+  }
+  console.log(
+    pi.status === "linked"
+      ? "Linked pi-profiles into this project's node_modules."
+      : pi.status === "installed"
+        ? "Installed pi-profiles globally and linked it into this project."
+        : "pi-profiles is resolvable. ✓",
+  );
+  if (r.shim) {
+    if (r.shim.status === "ok") {
+      console.log(`ppi already points at ppi-tui. ✓ (${r.shim.path})`);
+    } else if (r.shim.status === "error") {
+      console.error(r.shim.error);
+      process.exitCode = 1;
+    } else {
+      console.log(`Created the \`ppi\` command -> ${r.shim.path}`);
+      if (r.shim.backedUp) console.log(`(previous ppi saved as ${r.shim.backedUp})`);
+    }
+  }
+  console.log("\nDone. Run `ppi --version` to confirm.");
+}
+
+/** `setup` — resolve pi-profiles and link the `ppi` command. */
+async function cmdSetup(flags) {
+  // Overridable so tests can drive setup against a throwaway root.
+  const projectRoot = process.env.PPI_TUI_ROOT || join(__dirname, "..");
+  // The shim must point at the real entrypoint (bin/ppi-tui.js), not at this
+  // module — otherwise `ppi` would try to execute setup.js.
+  const binEntry = join(projectRoot, "bin", "ppi-tui.js");
+  const r = setup({
+    projectRoot,
+    target: binEntry,
+    binDir: flags.binDir || defaultBinDir(binEntry),
+    makeShim: !flags.noShim,
+    log: console.error,
+  });
+  printSetupResult(r);
+}
+
 /** Set the default profile without the TUI, mirroring `ppi set-default`. */
 function cmdSetDefault(pm, positionals) {
   const name = positionals[0];
@@ -414,6 +472,10 @@ export async function main(argv) {
     console.log((programName() + " " + packageVersion()).trim());
     return;
   }
+
+  // `setup` must run before we load pi-profiles: its whole job is to install
+  // / link pi-profiles so the rest of the tool can start.
+  if (subcommand === "setup") return cmdSetup(flags);
 
   const ProfileManager = await loadProfileManagerCtor();
   const pm = makeProfileManager(ProfileManager);
