@@ -234,3 +234,63 @@ test("unknown options are reported", async () => {
   const { err } = await run("--nope");
   assert.match(err, /Unknown option/);
 });
+
+// ------------------------------------------------------------------
+// `extensions` subcommands (all-profiles package management)
+// ------------------------------------------------------------------
+
+test("help documents the extensions subcommands", async () => {
+  const { out } = await run("--help");
+  assert.match(out, /extensions list/);
+  assert.match(out, /extensions install <source>/);
+  assert.match(out, /extensions update \[<source>\]/);
+  assert.match(out, /extensions remove <source>/);
+});
+
+test("extensions requires a known action", async () => {
+  const { err } = await run("extensions", "explode");
+  assert.match(err, /Unknown extensions action/);
+});
+
+test("extensions list shows profiles and their packages", async () => {
+  await run("create", "exta");
+  const { out } = await run("extensions", "list");
+  assert.match(out, /exta/);
+  assert.match(out, /shared physical install/);
+});
+
+test("extensions install without a source prints usage", async () => {
+  const { err } = await run("extensions", "install");
+  assert.match(err, /Usage: ppi-tui extensions install\|remove <source>/);
+});
+
+test("extensions install errors cleanly when there are no profiles", async () => {
+  // cli.test's PPI_PI_ROOT has only profiles created by earlier tests in this
+  // file, so create a truly empty root just for this case.
+  const empty = join(root, "emptyroot");
+  mkdirSync(join(empty, "agent"), { recursive: true });
+  writeFileSync(join(empty, "agent", "settings.json"), "{}");
+  const child = spawn(process.execPath, [BIN, "extensions", "install", "npm:pi-x"], {
+    env: { ...process.env, PPI_PI_ROOT: empty, PI_CODING_AGENT_DIR: "" },
+    stdio: ["pipe", "pipe", "pipe"],
+  });
+  let err = "";
+  child.stderr.on("data", (d) => (err += d));
+  const code = await new Promise((resolve) => child.on("close", resolve));
+  assert.notEqual(code, 0);
+  assert.match(err, /No profiles found/);
+  rmSync(empty, { recursive: true, force: true });
+});
+
+test("extension group aliases ext and x are accepted", async () => {
+  await run("create", "extal");
+  for (const alias of ["ext", "x"]) {
+    const { out } = await run(alias, "list");
+    assert.match(out, /extal/, `${alias} list lists profiles`);
+  }
+});
+
+test("unknown extension action still reports a clear error", async () => {
+  const { err } = await run("ext", "boom");
+  assert.match(err, /Unknown extensions action/);
+});

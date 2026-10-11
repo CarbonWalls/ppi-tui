@@ -42,11 +42,15 @@ node ./bin/ppi-tui.js
 ## Usage
 
 ```sh
-ppi-tui                       # interactive UI (needs a TTY)
+ppi-tui
 ppi-tui list                  # plain listing, no TTY needed
 ppi-tui create <name> [opts]  # create without the TUI
 ppi-tui delete <name> [--force]  # delete without the TUI
 ppi-tui set-default <name>    # set the default profile
+ppi-tui extensions install <source>   # add a package to every profile (shared)
+ppi-tui extensions update [<source>]  # update packages in every profile (shared)
+ppi-tui extensions list               # show packages across all profiles
+ppi-tui extensions remove <source>    # drop a package from every profile
 ppi-tui --version
 ppi-tui --help
 ```
@@ -67,6 +71,39 @@ ppi-tui set-default work
 
 `--own-auth` / `--own-models` copy `auth.json` / `models.json` into the profile
 instead of symlinking them back to the stock pi config.
+
+### Extension management across all profiles
+
+pi installs npm packages physically into *each* profile's `npm/` directory, so
+giving every profile the same extension means one full copy per profile. `ppi
+extensions` eliminates that by deduplicating the physical install.
+
+On the first `install` / `update`, every profile's `npm` dir is pointed at one
+shared install root (`~/.pi/shared/npm`, invisible to ppi because it lives
+outside `~/.pi/profiles/`). A profile that already had its own `npm` directory
+has its contents merged in and the dir becomes a symlink — so existing installs
+are kept, not re-downloaded.
+
+Each profile still keeps its **own** `packages` list in `settings.json`; only
+the bytes are shared. `pi install` / `pi update` therefore fetch once no matter
+how many profiles you have:
+
+```sh
+ppi extensions install pi-context-tree   # npm: is assumed for bare names
+ppi extensions install npm:@scope/pkg@1.0
+ppi extensions update                    # reconcile every installed package
+ppi extensions update pi-context-tree    # update just one
+ppi extensions list                      # who has what, shared or not
+ppi extensions remove pi-context-tree    # drop from every profile
+```
+
+Bare names are auto-prefixed with `npm:`; `git:`, `./path`, and `https://…`
+sources pass through unchanged. `remove` only edits the `packages` arrays —
+bytes stay in the shared cache (safe, and re-adding is instant).
+
+Short aliases: `ext` / `x` for `extensions`, and `i`/`add`, `u`/`up`,
+`l`/`ls`, `rm`/`un` per action. The examples above are the same as
+`ppi x i npm:pi-context-tree`, `ppi ext u`, `ppi x l`, `ppi ext rm foo`.
 
 The UI is a two-pane layout: profile list on the left, details for the selected
 profile on the right (model, provider, theme, whether auth/models are shared with
@@ -135,11 +172,12 @@ src/strutil.js        ANSI-aware string width utils (no deps)
 src/keys.js           raw-mode key parsing, paste detection
 src/term.js           terminal wrapper + colour painter
 src/profiles.js       ProfileManager loader + read-only enrichment
+src/extensions.js     shared-npm package management across all profiles
 src/launch.js         mirrors ppi's launch semantics
 src/render.js         pure renderFrame(state, ctx) -> string[]
 src/tui.js            pure reduce(state, key, api, height, meta) + runTui runtime
 src/cli.js            arg parsing, subcommands, non-TTY listing
-test/*.test.js        node --test suites (87 tests)
+test/*.test.js        node --test suites (105 tests)
 ```
 
 The app is built **pure-first** for testability: `renderFrame` and `reduce` are

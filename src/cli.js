@@ -7,6 +7,15 @@ import { dirname, join, basename } from "node:path";
 import { loadProfileManagerCtor, makeProfileManager } from "./profiles.js";
 import { launchPi } from "./launch.js";
 import { runTui } from "./tui.js";
+import {
+  ensureSharedNpm,
+  installExtensionForAll,
+  makePiRunner,
+  packageSharingSummaries,
+  removeExtensionFromAll,
+  sharedNpmDir,
+  updateExtensionsForAll,
+} from "./extensions.js";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 
@@ -45,7 +54,16 @@ Usage:
   ${p} create <name> [options]             Create a profile without the TUI
   ${p} delete <name> [--force]             Delete a profile without the TUI
   ${p} set-default <name>                  Set the default profile
+  ${p} extensions list                     List packages across all profiles
+  ${p} extensions install <source>         Install a package into every profile (shared)
+  ${p} extensions update [<source>]        Update packages in every profile (shared)
+  ${p} extensions remove <source>          Remove a package from every profile
   ${p} help                                Show this message
+
+Short aliases: ext | x for extensions; i/add, u/up, l/ls, rm/un for actions.
+Package sources are pi sources: npm:@scope/pkg, git:..., ./path, or a bare
+package name (npm: is assumed). Profiles share one physical install, so
+install/update fetch once regardless of how many profiles exist.
 
 Create options:
   --from <profile>                            Copy from an existing profile
@@ -106,7 +124,7 @@ function parseArgs(args) {
   const createOpts = { from: undefined, fromBase: false, ownAuth: false, ownModels: false };
   const positionals = [];
   let subcommand = null;
-  const SUBS = ["use", "list", "ls", "help", ...MUTATING_SUBS];
+  const SUBS = ["use", "list", "ls", "help", ...MUTATING_SUBS, "extensions", "ext", "x"];
   const CREATE_FLAGS = new Set(["--from", "--from-base", "--own-auth", "--own-models"]);
 
   for (let i = 0; i < own.length; i++) {
@@ -237,6 +255,131 @@ async function cmdDelete(pm, positionals, flags) {
   }
 }
 
+/* ------------------------------------------------------------------ *
+ * extensions subcommands (ppi extensions ...)
+ * ------------------------------------------------------------------ */
+
+/** `extensions list` — read-only package summary across all profiles. */
+function cmdExtensionsList(pm) {
+  const summaries = packageSharingSummaries(pm);
+  if (summaries.length === 0) {
+    console.log("No profiles found. Create one with `ppi create <name>` first.");
+    return;
+  }
+  const sharedRoot = sharedNpmDir(pm.piRoot);
+  console.log(
+    `Packages per profile (shared physical install: ${sharedRoot})`,
+  );
+  console.log("  shared = npm dir symlinked to the shared install (deduplicated)");
+  console.log("  local  = its own full npm copy (not yet migrated)");
+  console.log("  missing= no npm dir yet (created on first install/update)\n");
+
+  const nameW = Math.max(8, ...summaries.map((s) => s.name.length));
+  for (const s of summaries) {
+    const badges = s.sharing === "shared"
+      ? "shared"
+      : s.sharing === "local"
+        ? "local "
+        : "missin";
+    console.log(`${s.name.padEnd(nameW)} ${badges}`);
+    if (s.packages.length === 0) {
+      console.log(`${" ".repeat(nameW + 9)}— no packages configured`);
+      continue;
+    }
+    for (const pkg of typeof s.packages[0] === "string" ? s.packages : s.packages.map((p) => p.source)) {
+      console.log(`${" ".repeat(nameW + 9)}· ${pkg}`);
+    }
+  }
+}
+
+function requirePackageSource(positionals) {
+  const src = (positionals[0] || "").trim();
+  if (!src) {
+    die("Usage: " + programName() + " extensions install|remove <source>");
+    return null;
+  }
+  return src;
+}
+
+/** `extensions install <source>` — one physical install, all profiles. */
+async function cmdExtensionsInstall(pm, positionals) {
+  const src = requirePackageSource(positionals);
+  if (!src) return;
+  try {
+    const r = installExtensionForAll(pm, src, { run: makePiRunner(), log: console.error });
+    const { norm } = r;
+    console.error(`\nInstalled ${norm}.`);
+    const added = r.added.length ? `added to ${r.added.join(", ")}` : "";
+    const already = r.already.length ? `already present in ${r.already.join(", ")}` : "";
+    console.error([added, already].filter(Boolean).join("; ") || `Nothing to do for ${norm}.`);
+    if (r.report.migrated.length) {
+      console.error(
+        `Migrated ${r.report.migrated.join(", ")} to the shared install (deduplicated).`,
+      );
+    }
+    for (const w of r.report.warnings) console.error(`! ${w}`);
+  } catch (err) {
+    die(err.message);
+  }
+}
+
+/** `extensions update [<source>]` — reconcile packages across all profiles. */
+async function cmdExtensionsUpdate(pm, positionals) {
+  const src = (positionals[0] || "").trim() || undefined;
+  try {
+    updateExtensionsForAll(pm, src, { run: makePiRunner(), log: console.error });
+    console.error(`\nUpdated ${src || "all extensions"} across all profiles.`);
+  } catch (err) {
+    die(err.message);
+  }
+}
+
+/** `extensions remove <source>` — drop a package from every profile. */
+async function cmdExtensionsRemove(pm, positionals) {
+  const src = requirePackageSource(positionals);
+  if (!src) return;
+  try {
+    const r = removeExtensionFromAll(pm, src, { log: console.error });
+    if (r.removed.length) {
+      console.log(`Removed ${r.norm} from ${r.removed.join(", ")}.`);
+    } else if (r.missing.length) {
+      console.log(`${r.norm} is not configured in any profile.`);
+    }
+  } catch (err) {
+    die(err.message);
+  }
+}
+
+/** Route `ppi extensions ...`. Aliases: ext | x, and i/u/l/rm per action. */
+async function cmdExtensions(pm, positionals) {
+  const rawAction = (positionals[0] || "").toLowerCase();
+  const ACTION_ALIASES = {
+    list: "list", ls: "list", l: "list",
+    install: "install", i: "install", add: "install", a: "install",
+    update: "update", u: "update", up: "update",
+    remove: "remove", rm: "remove", r: "remove", uninstall: "remove", un: "remove",
+  };
+  const action = ACTION_ALIASES[rawAction] ?? rawAction;
+  const rest = positionals.slice(1);
+  switch (action) {
+    case "list":
+      cmdExtensionsList(pm);
+      return;
+    case "install":
+      return cmdExtensionsInstall(pm, rest);
+    case "update":
+      return cmdExtensionsUpdate(pm, rest);
+    case "remove":
+      return cmdExtensionsRemove(pm, rest);
+    default:
+      die(
+        "Unknown extensions action: " +
+          (rawAction || "<none>") +
+          ". Use: list | install <src> | update [<src>] | remove <src> (aliases: ext|x, i/u/l/rm)",
+      );
+  }
+}
+
 /** Set the default profile without the TUI, mirroring `ppi set-default`. */
 function cmdSetDefault(pm, positionals) {
   const name = positionals[0];
@@ -280,6 +423,8 @@ export async function main(argv) {
   if (subcommand === "create") return cmdCreate(pm, positionals, createOpts);
   if (subcommand === "delete") return cmdDelete(pm, positionals, flags);
   if (subcommand === "set-default") return cmdSetDefault(pm, positionals);
+  if (subcommand === "extensions" || subcommand === "ext" || subcommand === "x")
+    return cmdExtensions(pm, positionals);
 
   // Explicit listing, or automatic fallback when there is no terminal.
   const wantList =

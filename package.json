@@ -20,7 +20,7 @@
   ],
   "scripts": {
     "start": "node ./bin/ppi-tui.js",
-    "test": "node --test test/"
+    "test": "node --test 'test/*.test.js'"
   },
   "peerDependencies": {
     "pi-profiles": ">=0.1.0"
