@@ -308,6 +308,8 @@ test("'r' refreshes and clears stale selection", () => {
 
 let root;
 let savedAgentDir;
+let savedRoot;
+let savedCache;
 let ProfileManager;
 
 before(async () => {
@@ -319,7 +321,10 @@ before(async () => {
   writeFileSync(join(agentDir, "models.json"), "{}\n");
   writeFileSync(join(agentDir, "settings.json"), JSON.stringify({ defaultModel: "demo-1" }) + "\n");
 
+  savedRoot = process.env.PPI_PI_ROOT;
+  savedCache = process.env.PPI_TUI_CACHE_DIR;
   process.env.PPI_PI_ROOT = root;
+  process.env.PPI_TUI_CACHE_DIR = join(root, "cache");
   // Keep the live session's profile well away from this suite.
   savedAgentDir = process.env.PI_CODING_AGENT_DIR;
   delete process.env.PI_CODING_AGENT_DIR;
@@ -330,6 +335,10 @@ before(async () => {
 });
 
 after(() => {
+  if (savedRoot === undefined) delete process.env.PPI_PI_ROOT;
+  else process.env.PPI_PI_ROOT = savedRoot;
+  if (savedCache === undefined) delete process.env.PPI_TUI_CACHE_DIR;
+  else process.env.PPI_TUI_CACHE_DIR = savedCache;
   if (savedAgentDir === undefined) delete process.env.PI_CODING_AGENT_DIR;
   else process.env.PI_CODING_AGENT_DIR = savedAgentDir;
   rmSync(root, { recursive: true, force: true });

@@ -159,13 +159,29 @@ Input that arrives as one multi-keystroke chunk is treated as a paste and
 ignored in the list, and only its text is accepted in name fields. This keeps an
 accidental middle-click paste from confirming a delete or launching `pi`.
 
-### Sizes load in the background
+### Sizes load in the background, on a worker thread
 
 Byte sizes and modification times are the expensive part of loading a profile —
 a large one holds tens of thousands of files, and every file costs an `lstat`.
-The TUI renders immediately and fills those numbers in once measured, so a big
-profile set never blocks startup. The plain `list` subcommand skips them
-entirely (it prints a `—`), since a one-shot listing should stay fast.
+The TUI renders immediately and measures sizes on a **dedicated worker thread**,
+so the UI is never even marginally contended while the numbers fill in, and
+several profiles are measured concurrently rather than one at a time.
+
+Two more things keep sizes cheap:
+
+- **A size cache.** The result of a walk is stored (keyed to the pi root, in
+  your cache dir — honouring `PPI_TUI_CACHE_DIR` / `XDG_CACHE_HOME`, never
+  inside `~/.pi`) with a cheap fingerprint of the profile dir. An unchanged
+  profile within the cache TTL (60 s) skips the walk entirely, so starting the
+  TUI again shows sizes instantly.
+- **`r` really refreshes.** Pressing `r` re-enriches the list *and* re-walks
+  sizes in the background (bypassing the cache), so the numbers are current
+  again instead of disappearing.
+
+The plain `list` subcommand still skips size walks entirely (it prints a `—`),
+since a one-shot listing should stay fast. If worker threads are unavailable,
+measurement falls back to a cooperative in-process walk that yields between
+directories — slower, but never freezing the UI.
 
 ## Replacing `ppi` with `ppi-tui`
 
@@ -193,14 +209,15 @@ bin/ppi-tui.js        entry point
 src/strutil.js        ANSI-aware string width utils (no deps)
 src/keys.js           raw-mode key parsing, paste detection
 src/term.js           terminal wrapper + colour painter
-src/profiles.js       ProfileManager loader + read-only enrichment
+src/profiles.js       ProfileManager loader + enrichment + worker size walk
+src/size-worker.js    worker thread that walks a profile tree for byte size
 src/extensions.js     shared-npm package management across all profiles
 src/setup.js          one-command setup (link pi-profiles + ppi shim)
 src/launch.js         mirrors ppi's launch semantics
 src/render.js         pure renderFrame(state, ctx) -> string[]
 src/tui.js            pure reduce(state, key, api, height, meta) + runTui runtime
 src/cli.js            arg parsing, subcommands, non-TTY listing
-test/*.test.js        node --test suites (113 tests)
+test/*.test.js        node --test suites (116 tests)
 ```
 
 The app is built **pure-first** for testability: `renderFrame` and `reduce` are

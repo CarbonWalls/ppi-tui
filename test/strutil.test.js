@@ -28,6 +28,22 @@ test("visibleWidth counts display columns, not bytes or code units", () => {
   assert.equal(visibleWidth("x\ufe0f"), 1); // variation selector is 0 cells
 });
 
+test("visibleWidth fast path is exact at the range boundaries", () => {
+  // U+02FF is the last single-cell code point that is not a combining mark or
+  // wide char; U+0300 starts combining marks. The fast path (length == width
+  // for code points in 0x20..0x2ff) must not blur that line.
+  assert.equal(visibleWidth("a\u02ffb"), 3);
+  assert.equal(visibleWidth("a\u0300b"), 2);
+  assert.equal(visibleWidth("a\u1100b"), 4); // hangul leading jamo is wide
+  // Controls (C0 and DEL) are zero-width; the fast path backs off for them.
+  assert.equal(visibleWidth("a\x01b"), 2);
+  assert.equal(visibleWidth("a\x7fb"), 2);
+  assert.equal(visibleWidth("\x1b[31ma\x1b[0m"), 1);
+  // A plain string with no escapes comes back unallocated and identical.
+  assert.equal(stripAnsi("ab\x1b[0mcd"), "abcd");
+  assert.equal(stripAnsi("plain"), "plain");
+});
+
 test("charWidth handles control bytes", () => {
   assert.equal(charWidth(0x1b), 0);
   assert.equal(charWidth(0x7f), 0);

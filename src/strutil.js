@@ -76,13 +76,37 @@ export function charWidth(code) {
   return 1;
 }
 
+const ESC_BYTE = "\x1b".charCodeAt(0);
+
 /** Strip ANSI escape sequences from a string. */
 export function stripAnsi(str) {
-  return str.replace(ANSI_RE, "");
+  // Fast path: most strings in the render layer carry no escapes at all.
+  for (let i = 0; i < str.length; i++) {
+    if (str.charCodeAt(i) === ESC_BYTE) return str.replace(ANSI_RE, "");
+  }
+  return str;
 }
 
-/** Number of terminal columns `str` occupies (ANSI sequences ignored). */
+/**
+ * Number of terminal columns `str` occupies (ANSI sequences ignored).
+ *
+ * Fast path: a string whose code points all sit in the single-cell,
+ * non-combining range (0x20..0x2ff) and contain no controls or escapes has a
+ * visible width equal to its length — no scan, no allocation. This covers the
+ * overwhelming majority of rendered text (names, counts, labels).
+ */
 export function visibleWidth(str) {
+  if (str === "") return 0;
+  let fast = true;
+  for (let i = 0; i < str.length; i++) {
+    const c = str.charCodeAt(i);
+    if (c < 0x20 || c === 0x7f || c >= 0x300) {
+      fast = false;
+      break;
+    }
+  }
+  if (fast) return str.length;
+
   const plain = stripAnsi(str);
   let width = 0;
   for (const ch of plain) {

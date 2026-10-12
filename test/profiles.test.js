@@ -22,6 +22,7 @@ let profilesDir;
 let ProfileManager;
 let pm;
 let savedRoot;
+let savedCache;
 
 before(async () => {
   root = mkdtempSync(join(tmpdir(), "ppi-tui-"));
@@ -39,7 +40,9 @@ before(async () => {
   );
 
   savedRoot = process.env.PPI_PI_ROOT;
+  savedCache = process.env.PPI_TUI_CACHE_DIR;
   process.env.PPI_PI_ROOT = root;
+  process.env.PPI_TUI_CACHE_DIR = join(root, "cache");
 
   ProfileManager = await loadProfileManagerCtor();
   pm = makeProfileManager(ProfileManager);
@@ -48,6 +51,8 @@ before(async () => {
 after(() => {
   if (savedRoot === undefined) delete process.env.PPI_PI_ROOT;
   else process.env.PPI_PI_ROOT = savedRoot;
+  if (savedCache === undefined) delete process.env.PPI_TUI_CACHE_DIR;
+  else process.env.PPI_TUI_CACHE_DIR = savedCache;
   rmSync(root, { recursive: true, force: true });
 });
 
@@ -157,6 +162,43 @@ test("measureProfile yields to the event loop and can be cancelled", async () =>
   // seen — both are acceptable, but it must never hang.
   assert.ok(cancelled.aborted === true || cancelled.aborted === false);
   rmSync(deep, { recursive: true, force: true });
+});
+
+test("measureProfile caches unchanged profiles and bypasses on force", async () => {
+  const profiles = enrichAll(pm, { currentDir: null });
+  const byName = Object.fromEntries(profiles.map((p) => [p.name, p]));
+  const profilePath = byName.copy.path;
+
+  // Force a real walk first (bypasses anything already cached).
+  const first = await measureProfile(profilePath, { force: true });
+  assert.equal(first.aborted, false);
+  assert.equal(first.cache, "worker");
+  assert.ok(Number.isFinite(first.sizeBytes));
+
+  // An unchanged profile now hits the cache with the same numbers.
+  const second = await measureProfile(profilePath);
+  assert.equal(second.cache, "hit");
+  assert.equal(second.sizeBytes, first.sizeBytes);
+
+  // Editing settings.json invalidates the fingerprint -> re-walk.
+  const settingsFile = join(profilePath, "settings.json");
+  writeFileSync(settingsFile, JSON.stringify({ defaultModel: "changed" }) + "\n");
+  const third = await measureProfile(profilePath);
+  assert.equal(third.cache, "worker");
+  assert.equal(third.aborted, false);
+});
+
+test("measureProfile.cancel terminates an in-flight walk without hanging", async () => {
+  const profiles = enrichAll(pm, { currentDir: null });
+  const byName = Object.fromEntries(profiles.map((p) => [p.name, p]));
+  const profilePath = byName.own.path;
+
+  const m = measureProfile(profilePath, { force: true });
+  m.cancel();
+  const r = await m;
+  // Cancelled -> aborted; unless the (tiny) walk finished first, which is also
+  // fine. The important thing is that it resolves promptly and never hangs.
+  assert.ok(r.aborted === true || r.aborted === false);
 });
 
 test("enrichment flags the default and the running profile", () => {

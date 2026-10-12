@@ -138,7 +138,8 @@ function createFocusOrder(modal) {
 
 /**
  * Apply one key event to the state. Returns `{ state, control }` where control
- * is either null, `{ kind: "quit" }`, or `{ kind: "launch", path }`.
+ * is either null, `{ kind: "quit" }`, `{ kind: "launch", path }`, or
+ * `{ kind: "remeasure" }` (a manual refresh wants fresh sizes).
  *
  * `meta.paste` marks keys that arrived as part of a paste (or coalesced read).
  * Such keys never trigger actions — a paste must not launch pi or open dialogs —
@@ -166,7 +167,10 @@ function reduceList(state, key, api, height, meta = {}) {
   if (key === "r" || key === "ctrl+r" || key === "f5") {
     let next = refreshProfiles(state, api);
     next = scrollToSelection(next, height);
-    return { state: withStatus(next, `Refreshed — ${next.profiles.length} profile(s)`), control: null };
+    return {
+      state: withStatus(next, `Refreshed — ${next.profiles.length} profile(s)`),
+      control: { kind: "remeasure" },
+    };
   }
   if (key === "n" || key === "c") {
     return { state: { ...state, modal: openCreateModal(state) }, control: null };
@@ -479,9 +483,25 @@ export async function runTui({
   });
 
   term.setup();
+
+  // In-flight size measurements. Kept so a quit/launch can terminate their
+  // worker threads immediately — otherwise a mid-walk thread would keep this
+  // process alive after the screen is gone.
+  const activeMeasures = new Set();
+  const cancelMeasures = () => {
+    for (const m of activeMeasures) {
+      try {
+        m.cancel?.();
+      } catch {
+        /* already settled */
+      }
+    }
+    activeMeasures.clear();
+  };
   const teardown = () => {
     if (!exiting) {
       exiting = true;
+      cancelMeasures();
       term.teardown();
     }
   };
@@ -504,40 +524,46 @@ export async function runTui({
     });
   }
 
-  // A pending size measurement keeps a `setImmediate` chain alive, which would
-  // stop the process from exiting after we leave the screen. `shouldStop`
-  // cancels the walk, and this lets the event loop drain once nothing else is
-  // pending. Used by the quit/launch paths below.
-  const stopMeasuring = () => {
-    exiting = true;
+  // Sizes/mtimes are measured in the background on worker threads: the walk is
+  // the slowest part of loading (tens of thousands of lstat calls on a big
+  // profile), and keeping it off the main thread means rendering and key
+  // handling are never contended. Profiles are measured concurrently (capped),
+  // and an unchanged profile hits the size cache instead of re-walking.
+  //
+  // `force` bypasses the cache — used by a manual refresh, where the user asked
+  // for current numbers.
+  const measureSizes = async (force) => {
+    const targets = state.profiles.filter((p) => force || p.sizeBytes === undefined);
+    if (targets.length === 0) return;
+    const cap = Math.min(4, targets.length);
+    let cursor = 0;
+    const worker = async () => {
+      while (cursor < targets.length) {
+        if (exiting) return;
+        const prof = targets[cursor++];
+        const measure = measureProfile(prof.path, { shouldStop: () => exiting, force });
+        activeMeasures.add(measure);
+        const measured = await measure;
+        activeMeasures.delete(measure);
+        if (exiting || measured.aborted) return;
+        // Profiles may have changed underneath us; re-resolve by path.
+        const idx = state.profiles.findIndex((p) => p.path === prof.path);
+        if (idx < 0) continue;
+        const existing = state.profiles[idx];
+        if (!force && existing.sizeBytes !== undefined) continue;
+        state.profiles[idx] = {
+          ...existing,
+          sizeBytes: measured.sizeBytes,
+          sizeLabel: humanSize(measured.sizeBytes),
+          mtimeMs: measured.mtimeMs,
+          mtimeLabel: timeLabel(measured.mtimeMs),
+        };
+        render();
+      }
+    };
+    await Promise.all(Array.from({ length: cap }, () => worker()));
   };
-
-  // Sizes/mtimes are measured in the background: the walk that produces them is
-  // by far the slowest part of loading (tens of thousands of lstat calls on a
-  // big profile). It yields to the event loop between directories, so it never
-  // freezes the UI, and it is cancelled the moment we exit so quitting is
-  // immediate even mid-walk.
-  const measureSizes = async () => {
-    for (const prof of state.profiles) {
-      if (exiting) return;
-      const measured = await measureProfile(prof.path, { shouldStop: () => exiting });
-      if (exiting || measured.aborted) return;
-      // Profiles may have changed underneath us; re-resolve by path.
-      const idx = state.profiles.findIndex((p) => p.path === prof.path);
-      if (idx < 0) continue;
-      const existing = state.profiles[idx];
-      if (existing.sizeBytes !== undefined) continue;
-      state.profiles[idx] = {
-        ...existing,
-        sizeBytes: measured.sizeBytes,
-        sizeLabel: humanSize(measured.sizeBytes),
-        mtimeMs: measured.mtimeMs,
-        mtimeLabel: timeLabel(measured.mtimeMs),
-      };
-      render();
-    }
-  };
-  void measureSizes();
+  void measureSizes(false);
 
   render();
 
@@ -568,6 +594,11 @@ export async function runTui({
           }
           launchPi(result.control.path, piArgs);
           return;
+        }
+        if (result.control?.kind === "remeasure") {
+          // Manual refresh: re-walk sizes (bypassing the cache) in the
+          // background so the numbers are actually current again.
+          void measureSizes(true);
         }
         render();
       }

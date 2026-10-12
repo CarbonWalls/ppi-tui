@@ -11,19 +11,69 @@
 
 import { pathToFileURL } from "node:url";
 import { execSync } from "node:child_process";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import {
   existsSync,
   lstatSync,
+  mkdirSync,
   readdirSync,
   readFileSync,
   readlinkSync,
+  renameSync,
   statSync,
+  writeFileSync,
 } from "node:fs";
+import { Worker } from "node:worker_threads";
 import { homedir } from "node:os";
 import { humanSize, timeLabel } from "./strutil.js";
 
 const KNOWN_COUNT_DIRS = ["extensions", "skills", "tools", "prompts"];
+
+/**
+ * Candidate global npm roots, cheapest-first and WITHOUT spawning a
+ * subprocess. `npm root -g` is authoritative but slow (~100-400ms of node/npm
+ * startup), so we probe roots we can derive for free first:
+ *
+ *   - our own node's sibling `lib/node_modules` (covers nvm, homebrew, and
+ *     most `npm install -g` prefixes, where node's `execPath` lives under
+ *     `<prefix>/bin`);
+ *   - the npm prefix env vars (`npm_config_prefix` is what npm itself reads);
+ *   - the well-known global locations.
+ *
+ * These cover the overwhelmingly common install layouts. If none of them has
+ * pi-profiles we fall back to running `npm root -g` once, so exotic prefixes
+ * still work — just at the cost of the spawn.
+ */
+export function globalNpmRootCandidates() {
+  const roots = [];
+  const add = (r) => {
+    if (r && !roots.includes(r)) roots.push(r);
+  };
+
+  // Derived from the running node binary: `<prefix>/bin/node` -> `<prefix>/lib/node_modules`.
+  try {
+    const binDir = dirname(process.execPath);
+    add(join(dirname(binDir), "lib", "node_modules"));
+  } catch {
+    /* execPath unavailable */
+  }
+
+  // npm's own prefix env vars (npm_config_prefix wins; PREFIX is the classic).
+  for (const key of ["npm_config_prefix", "NPM_CONFIG_PREFIX", "PREFIX"]) {
+    const prefix = process.env[key];
+    if (prefix) add(join(prefix, "lib", "node_modules"));
+  }
+
+  const home = homedir();
+  if (process.platform === "win32") {
+    add(join(process.env.APPDATA ?? "", "npm", "node_modules"));
+  } else {
+    add("/usr/local/lib/node_modules", "/usr/lib/node_modules");
+  }
+  add(join(home, ".npm-global", "lib", "node_modules"));
+  add(join(home, ".local", "share", "npm", "lib", "node_modules"));
+  return roots;
+}
 
 /** Resolve ppi's ProfileManager constructor from wherever it is installed. */
 export async function loadProfileManagerCtor() {
@@ -36,22 +86,26 @@ export async function loadProfileManagerCtor() {
     /* fall through to global lookup */
   }
 
-  // 2) Global npm roots, in install order of preference.
-  const roots = [];
+  // 2) Global npm roots. Try the no-subprocess candidates first; only if none
+  //    of them carries pi-profiles do we pay for `npm root -g`.
+  let mod = await tryRoots(globalNpmRootCandidates());
+  if (mod) return mod;
+
   try {
-    roots.push(execSync("npm root -g", { encoding: "utf8" }).trim());
+    const npmRoot = execSync("npm root -g", { encoding: "utf8" }).trim();
+    if (npmRoot) mod = await tryRoots([npmRoot]);
   } catch {
     /* npm unavailable */
   }
-  if (process.platform === "win32") {
-    roots.push(join(process.env.APPDATA ?? "", "npm", "node_modules"));
-  } else {
-    roots.push("/usr/local/lib/node_modules", "/usr/lib/node_modules");
-  }
-  const home = homedir();
-  roots.push(join(home, ".npm-global", "lib", "node_modules"));
-  roots.push(join(home, ".local", "share", "npm", "lib", "node_modules"));
+  if (mod) return mod;
 
+  throw new Error(
+    "pi-profiles (ppi) not found. Install it first: npm install -g pi-profiles",
+  );
+}
+
+/** Import ProfileManager from the first root that actually contains it. */
+async function tryRoots(roots) {
   const seen = new Set();
   for (const root of roots) {
     if (!root || seen.has(root)) continue;
@@ -59,16 +113,13 @@ export async function loadProfileManagerCtor() {
     const pkgPath = join(root, "pi-profiles");
     if (!existsSync(pkgPath)) continue;
     try {
-      const mod = await import(pathToFileURL(join(pkgPath, "dist", "src", "index.js")).href);
-      if (mod?.ProfileManager) return mod.ProfileManager;
+      const m = await import(pathToFileURL(join(pkgPath, "dist", "src", "index.js")).href);
+      if (m?.ProfileManager) return m.ProfileManager;
     } catch {
       /* keep trying */
     }
   }
-
-  throw new Error(
-    "pi-profiles (ppi) not found. Install it first: npm install -g pi-profiles",
-  );
+  return null;
 }
 
 /**
@@ -141,26 +192,131 @@ function dirMtime(dir) {
   }
 }
 
+/* ------------------------------------------------------------------ *
+ * Byte-size measurement: worker thread + size cache layer
+ * ------------------------------------------------------------------ */
+
+const MAX_WALK_DEPTH = 6;
+
 /**
- * Compute the byte size and mtime for one profile dir *cooperatively*.
- *
- * `dirSize` is by far the most expensive part of enrichment — a large profile
- * can hold tens of thousands of files and every one of them costs an
- * `lstatSync`. Doing that walk synchronously would freeze the UI for several
- * seconds (keystrokes and renders stop), so this version walks one directory
- * per tick and yields back to the event loop between them. The TUI stays
- * responsive the whole time and the number fills in once the walk finishes.
- *
- * `shouldStop` is checked between directories so quitting cancels the walk.
+ * Cheap on-disk fingerprint of a profile dir, used to decide whether a
+ * previously measured size is still trustworthy. Three or four stat/readdir
+ * syscalls — nothing like the full walk.
  */
-export async function measureProfile(profilePath, { shouldStop } = {}) {
-  const stopped = () => (typeof shouldStop === "function" ? shouldStop() : false);
+function profileFingerprint(profilePath) {
+  let topMtimeMs;
+  let topCount;
+  let settingsMtimeMs;
+  try {
+    topMtimeMs = statSync(profilePath).mtimeMs;
+    topCount = readdirSync(profilePath).length;
+  } catch {
+    return null; // profile vanished — can't fingerprint, so don't cache
+  }
+  try {
+    settingsMtimeMs = statSync(join(profilePath, "settings.json")).mtimeMs;
+  } catch {
+    settingsMtimeMs = -1; // no settings.json
+  }
+  return { topMtimeMs, topCount, settingsMtimeMs };
+}
+
+// Size cache: within the TTL, an unchanged profile (same fingerprint) reuses
+// its measured size instead of re-walking tens of thousands of files. The file
+// lives in our own cache dir (honouring PPI_TUI_CACHE_DIR / XDG_CACHE_HOME),
+// never inside ~/.pi — ppi-tui doesn't write to ppi's tree.
+const SIZE_CACHE_VERSION = 1;
+const SIZE_CACHE_TTL_MS = 60_000;
+
+function hashString(s) {
+  let h = 5381;
+  for (let i = 0; i < s.length; i++) h = ((h << 5) + h + s.charCodeAt(i)) | 0;
+  return (h >>> 0).toString(36);
+}
+
+function sizeCacheDir() {
+  return (
+    process.env.PPI_TUI_CACHE_DIR ||
+    (process.platform === "win32"
+      ? join(process.env.LOCALAPPDATA ?? "", "ppi-tui")
+      : join(process.env.XDG_CACHE_HOME || join(homedir(), ".cache"), "ppi-tui"))
+  );
+}
+
+function sizeCachePath() {
+  return join(sizeCacheDir(), `sizes-${hashString(process.env.PPI_PI_ROOT || "root")}.json`);
+}
+
+let sizeCache = null;
+let sizeCacheFlush = null;
+
+function loadSizeCache() {
+  if (sizeCache) return sizeCache;
+  const data = { version: SIZE_CACHE_VERSION, profiles: {} };
+  try {
+    const raw = JSON.parse(readFileSync(sizeCachePath(), "utf8"));
+    if (raw && raw.version === SIZE_CACHE_VERSION && raw.profiles && typeof raw.profiles === "object") {
+      data.profiles = raw.profiles;
+    }
+  } catch {
+    /* missing or corrupt — start empty */
+  }
+  sizeCache = data;
+  return data;
+}
+
+/** Best-effort, debounced, atomic-ish cache write (tmp + rename). */
+function scheduleSizeCacheFlush() {
+  if (sizeCacheFlush) return;
+  sizeCacheFlush = setImmediate(() => {
+    sizeCacheFlush = null;
+    try {
+      const file = sizeCachePath();
+      mkdirSync(dirname(file), { recursive: true });
+      writeFileSync(file + ".tmp", JSON.stringify(sizeCache ?? { version: SIZE_CACHE_VERSION, profiles: {} }), "utf8");
+      renameSync(file + ".tmp", file);
+    } catch {
+      /* cache is best-effort; never block the app on it */
+    }
+  });
+}
+
+function readSizeCache(profilePath) {
+  const fp = profileFingerprint(profilePath);
+  if (!fp) return null;
+  const entry = loadSizeCache().profiles[profilePath];
+  if (!entry || entry.version !== SIZE_CACHE_VERSION) return null;
+  if (
+    entry.topMtimeMs !== fp.topMtimeMs ||
+    entry.topCount !== fp.topCount ||
+    entry.settingsMtimeMs !== fp.settingsMtimeMs
+  ) {
+    return null;
+  }
+  if (Date.now() - entry.recordedAt > SIZE_CACHE_TTL_MS) return null;
+  return { sizeBytes: entry.sizeBytes, mtimeMs: entry.mtimeMs };
+}
+
+function putSizeCache(profilePath, { sizeBytes, mtimeMs }) {
+  const fp = profileFingerprint(profilePath);
+  if (!fp) return;
+  loadSizeCache().profiles[profilePath] = {
+    version: SIZE_CACHE_VERSION,
+    sizeBytes,
+    mtimeMs,
+    ...fp,
+    recordedAt: Date.now(),
+  };
+  scheduleSizeCacheFlush();
+}
+
+/** Cooperative in-process walk (fallback when worker threads are unavailable). */
+async function walkCooperative(profilePath, stopped) {
   let total = 0;
   const stack = [[profilePath, 0]];
-
   while (stack.length > 0) {
     const [dir, depth] = stack.pop();
-    if (depth > 6) continue;
+    if (depth > MAX_WALK_DEPTH) continue;
     if (stopped()) return { sizeBytes: undefined, mtimeMs: undefined, aborted: true };
     try {
       for (const entry of readdirSync(dir, { withFileTypes: true })) {
@@ -169,22 +325,126 @@ export async function measureProfile(profilePath, { shouldStop } = {}) {
         // lstat on the entry itself: symlinks count as their link size only, so
         // auth/models shared with the base profile are not double-counted.
         const st = lstatSync(p);
-        if (st.isSymbolicLink()) {
-          total += st.size;
-        } else if (st.isDirectory()) {
-          stack.push([p, depth + 1]);
-        } else {
-          total += st.size;
-        }
+        if (st.isSymbolicLink()) total += st.size;
+        else if (st.isDirectory()) stack.push([p, depth + 1]);
+        else total += st.size;
       }
     } catch {
       /* unreadable */
     }
-    // Yield to the event loop so input and renders keep flowing.
+    // Yield between directories so a fallback walk never freezes the UI.
     await new Promise((r) => setImmediate(r));
   }
-
   return { sizeBytes: total, mtimeMs: dirMtime(profilePath), aborted: false };
+}
+
+/**
+ * Measure one profile dir's byte size and mtime, off the main thread.
+ *
+ * The walk is syscall-bound (one lstat per entry — tens of thousands on a big
+ * profile), so it runs on a dedicated worker thread: the UI keeps rendering
+ * and answering keys with zero contention, and several profiles can be
+ * measured concurrently. If workers are unavailable it falls back to a
+ * cooperative in-process loop that yields between directories.
+ *
+ * A size-cache layer lets an *unchanged* profile (same cheap fingerprint within
+ * the TTL) skip the walk entirely; pass `force: true` to bypass it.
+ *
+ * Returns a thenable with a `cancel` method that terminates an in-flight walk.
+ * Resolves `{ sizeBytes, mtimeMs, aborted, cache }`, where `cache` is
+ * "hit" | "worker" | "walk" | "none".
+ */
+export function measureProfile(profilePath, { shouldStop, force = false } = {}) {
+  const stopped = () => typeof shouldStop === "function" && shouldStop();
+  let worker = null;
+  let poll = null;
+  let finished = false;
+  let fallbackStarted = false;
+  let resolveResult;
+
+  const settled = (result) => {
+    if (finished) return;
+    finished = true;
+    if (poll) clearImmediate(poll);
+    resolveResult(result);
+  };
+
+  // Fallback used when the worker cannot start or fails mid-walk. Runs once;
+  // `settled` guards against any error/exit racing this with a message.
+  async function cooperative() {
+    const r = await walkCooperative(profilePath, stopped);
+    if (!r.aborted) putSizeCache(profilePath, r);
+    return { ...r, cache: r.aborted ? "none" : "walk" };
+  }
+  const fallback = () => {
+    if (fallbackStarted) return;
+    fallbackStarted = true;
+    cooperative().then(settled);
+  };
+
+  const p = new Promise((resolve) => {
+    resolveResult = resolve;
+
+    // Bail straight away if the caller is already tearing down.
+    if (stopped()) {
+      settled({ sizeBytes: undefined, mtimeMs: undefined, aborted: true, cache: "none" });
+      return;
+    }
+
+    if (!force) {
+      const hit = readSizeCache(profilePath);
+      if (hit && !stopped()) {
+        settled({ sizeBytes: hit.sizeBytes, mtimeMs: hit.mtimeMs, aborted: false, cache: "hit" });
+        return;
+      }
+    }
+
+    try {
+      worker = new Worker(new URL("./size-worker.js", import.meta.url), { type: "module" });
+    } catch {
+      worker = null;
+    }
+
+    if (!worker) {
+      fallback();
+      return;
+    }
+
+    worker.once("message", (m) => {
+      if (finished) return;
+      if (!m || typeof m.sizeBytes !== "number") return fallback();
+      const r = { sizeBytes: m.sizeBytes, mtimeMs: m.mtimeMs, aborted: false };
+      putSizeCache(profilePath, r);
+      settled({ ...r, cache: "worker" });
+    });
+    worker.once("error", fallback);
+    worker.once("exit", () => {
+      if (!finished) fallback();
+    });
+    worker.postMessage(profilePath);
+
+    // Poll the caller's stop flag from the main thread; a setImmediate chain is
+    // cheaper than a timer and drains cleanly once the result lands.
+    poll = setImmediate(function pump() {
+      if (finished) return;
+      if (stopped()) return abort();
+      poll = setImmediate(pump);
+    });
+  });
+
+  const abort = () => {
+    if (finished) return;
+    if (worker) {
+      try {
+        worker.terminate();
+      } catch {
+        /* already gone */
+      }
+    }
+    settled({ sizeBytes: undefined, mtimeMs: undefined, aborted: true, cache: "none" });
+  };
+  p.cancel = abort;
+  return p;
 }
 
 /**

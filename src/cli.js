@@ -6,19 +6,13 @@ import { fileURLToPath } from "node:url";
 import { dirname, join, basename } from "node:path";
 import { loadProfileManagerCtor, makeProfileManager } from "./profiles.js";
 import { launchPi } from "./launch.js";
-import { runTui } from "./tui.js";
-import {
-  ensureSharedNpm,
-  installExtensionForAll,
-  makePiRunner,
-  packageSharingSummaries,
-  removeExtensionFromAll,
-  sharedNpmDir,
-  updateExtensionsForAll,
-} from "./extensions.js";
-import { defaultBinDir, setup } from "./setup.js";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
+
+// Heavy modules (the TUI, extensions manager, setup) are intentionally NOT
+// imported eagerly. `ppi --version`, `help`, `list` and direct launches never
+// need them, and importing them eagerly adds ~20ms of module-graph load to
+// every one-liner. They are loaded lazily, exactly where they run.
 
 /**
  * The name this tool was invoked as.
@@ -268,7 +262,8 @@ async function cmdDelete(pm, positionals, flags) {
  * ------------------------------------------------------------------ */
 
 /** `extensions list` — read-only package summary across all profiles. */
-function cmdExtensionsList(pm) {
+async function cmdExtensionsList(pm) {
+  const { packageSharingSummaries, sharedNpmDir } = await import("./extensions.js");
   const summaries = packageSharingSummaries(pm);
   if (summaries.length === 0) {
     console.log("No profiles found. Create one with `ppi create <name>` first.");
@@ -314,6 +309,7 @@ async function cmdExtensionsInstall(pm, positionals) {
   const src = requirePackageSource(positionals);
   if (!src) return;
   try {
+    const { installExtensionForAll, makePiRunner } = await import("./extensions.js");
     const r = installExtensionForAll(pm, src, { run: makePiRunner(), log: console.error });
     const { norm } = r;
     console.error(`\nInstalled ${norm}.`);
@@ -335,6 +331,7 @@ async function cmdExtensionsInstall(pm, positionals) {
 async function cmdExtensionsUpdate(pm, positionals) {
   const src = (positionals[0] || "").trim() || undefined;
   try {
+    const { makePiRunner, updateExtensionsForAll } = await import("./extensions.js");
     updateExtensionsForAll(pm, src, { run: makePiRunner(), log: console.error });
     console.error(`\nUpdated ${src || "all extensions"} across all profiles.`);
   } catch (err) {
@@ -347,6 +344,7 @@ async function cmdExtensionsRemove(pm, positionals) {
   const src = requirePackageSource(positionals);
   if (!src) return;
   try {
+    const { removeExtensionFromAll } = await import("./extensions.js");
     const r = removeExtensionFromAll(pm, src, { log: console.error });
     if (r.removed.length) {
       console.log(`Removed ${r.norm} from ${r.removed.join(", ")}.`);
@@ -371,7 +369,7 @@ async function cmdExtensions(pm, positionals) {
   const rest = positionals.slice(1);
   switch (action) {
     case "list":
-      cmdExtensionsList(pm);
+      await cmdExtensionsList(pm);
       return;
     case "install":
       return cmdExtensionsInstall(pm, rest);
@@ -428,6 +426,7 @@ async function cmdSetup(flags) {
   // The shim must point at the real entrypoint (bin/ppi-tui.js), not at this
   // module — otherwise `ppi` would try to execute setup.js.
   const binEntry = join(projectRoot, "bin", "ppi-tui.js");
+  const { defaultBinDir, setup } = await import("./setup.js");
   const r = setup({
     projectRoot,
     target: binEntry,
@@ -529,6 +528,10 @@ export async function main(argv) {
     return;
   }
 
+  // The TUI is the only path that needs the full render/key/term stack, so it
+  // is imported lazily here rather than at the top of this module — that keeps
+  // `--version`, `help`, `list` and direct launches off the heavy module graph.
+  const { runTui } = await import("./tui.js");
   await runTui({
     ProfileManager,
     piArgs,
