@@ -112,15 +112,26 @@ function tryLinkPiProfiles(nodeModules, globalPath, log) {
  * ------------------------------------------------------------------ */
 
 /**
- * The npm global bin dir. When we're installed as a package we can derive it
- * from our own script path (<npmRoot>/<pkg>/bin/ppi-tui.js -> <npmRoot>/bin);
- * otherwise ask npm directly.
+ * The npm global bin dir.
+ *
+ * Best guess first, no subprocesses: the running node's own bin dir. That is
+ * exactly where global bins land for nvm (`<nvm>/versions/node/vX/bin`),
+ * homebrew (`/usr/local/bin`) and distro (`/usr/bin`) installs. `npm root -g`
+ * is authoritative but `npm bin` was removed in npm 11, so we fall back to
+ * `npm root -g`'s sibling `bin`, then the installed-package script path, then
+ * a conventional default.
  */
 export function defaultBinDir(scriptPath) {
   try {
-    const res = spawnSync("npm", ["bin", "-g"], { encoding: "utf8", stdio: ["ignore", "pipe", "ignore"] });
-    const dir = (res.stdout || "").trim();
-    if (dir) return dir;
+    const bin = dirname(process.execPath);
+    if (bin) return bin;
+  } catch {
+    /* execPath unavailable */
+  }
+  try {
+    const res = spawnSync("npm", ["root", "-g"], { encoding: "utf8", stdio: ["ignore", "pipe", "ignore"] });
+    const root = (res.stdout || "").trim();
+    if (root) return join(root, "..", "bin");
   } catch {
     /* fall through */
   }

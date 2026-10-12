@@ -14,8 +14,9 @@ import {
   symlinkSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import {
+  defaultBinDir,
   ensurePiProfiles,
   ensurePpiShim,
   findGlobalPiProfiles,
@@ -87,6 +88,16 @@ function symlinkOrFile(path, target) {
     /* already exists */
   }
 }
+
+test("defaultBinDir prefers the running node's bin dir, never npm bin -g", () => {
+  // npm removed `npm bin` in v11; the old implementation fell through to a
+  // regex that misses source checkouts and returned /usr/local/bin. For nvm,
+  // homebrew and distro installs the running node's bin dir is exactly right.
+  const bin = defaultBinDir("/home/user/somewhere/bin/ppi-tui.js");
+  assert.equal(bin, dirname(process.execPath));
+  assert.notEqual(bin, "/usr/local/bin");
+  assert.ok(process.execPath.startsWith(bin), "executable itself lives there");
+});
 
 test("setup() reports ok and links pi-profiles + shim end to end", () => {
   const proj = join(root, "full");
