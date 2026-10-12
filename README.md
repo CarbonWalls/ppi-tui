@@ -33,9 +33,10 @@ ppi --version      # confirm
 ```
 
 The one command `ppi setup` wires everything: it symlinks `pi-profiles` into
-place if it's missing, and points the global `ppi` command at ppi-tui (backing
-up any previous `ppi` to `ppi.orig.bak`). It's idempotent and never destroys
-your existing install.
+place if it's missing, and points the global `ppi` command at ppi-tui (replacing
+any previous symlink). It's idempotent and never destroys your existing install —
+the original `pi-profiles` package stays installed, so nothing is lost, and
+`npm i -g pi-profiles` recreates its `ppi` bin anytime.
 
 ### From a clone (development)
 
@@ -193,9 +194,10 @@ also ships a `ppi` bin, ppi-tui never declares a conflicting `ppi` in
 ppi setup
 ```
 
-It points the global `ppi` at ppi-tui's entrypoint and renames any existing
-`ppi` to `ppi.orig.bak` (so the original pi-profiles CLI is one command away if
-you ever want it back). Because every mutation delegates to `ppi`'s own
+It points the global `ppi` at ppi-tui's entrypoint, replacing any existing
+symlink. The original pi-profiles CLI is never lost — the package stays
+installed, so its `ppi` bin can always be recreated with `npm i -g
+pi-profiles`. Because every mutation delegates to `ppi`'s own
 `ProfileManager`, and the subcommands mirror `ppi`'s flags one-for-one, scripts
 calling `ppi` keep working.
 

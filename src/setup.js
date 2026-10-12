@@ -19,8 +19,8 @@ import {
   lstatSync,
   mkdirSync,
   readlinkSync,
-  renameSync,
   symlinkSync,
+  unlinkSync,
 } from "node:fs";
 import { fileURLToPath } from "node:url";
 
@@ -150,15 +150,19 @@ export function selfBinPath() {
 }
 
 /**
- * Point the `ppi` command at ppi-tui's own bin, backing up anything already
+ * Point the `ppi` command at ppi-tui's own bin, replacing anything already
  * occupying that name. Idempotent: if `ppi` already points at ppi-tui, it's a
  * no-op.
  *
- * Returns { status: 'ok'|'linked'|'backedUpLink'|'error', path?, backedUp?, error? }.
- * - ok           -> `ppi` already was this tool
- * - linked       -> created a fresh `ppi` shim
- * - backedUpLink -> renamed an existing `ppi` to `<dir>/ppi.<tool>.bak`, then linked
- * - error        -> `ppi` is a real file we won't touch; old component not a symlink
+ * Returns { status: 'ok'|'linked'|'error', path, error? }.
+ * - ok      -> `ppi` already was this tool
+ * - linked  -> created a fresh `ppi` shim, or replaced a symlink that pointed
+ *              elsewhere
+ * - error   -> `ppi` is a real file we refuse to touch
+ *
+ * A previous `ppi` (the original pi-profiles CLI) is replaced without a .bak:
+ * the package stays installed, so its `ppi` bin can always be recreated with
+ * `npm i -g pi-profiles`, and nothing the user owns is lost.
  */
 export function ensurePpiShim(binDir, target, { log = noop } = {}) {
   const ppiPath = join(binDir, "ppi");
@@ -187,19 +191,22 @@ export function ensurePpiShim(binDir, target, { log = noop } = {}) {
     };
   }
 
-  let backedUp = undefined;
+  // Replace any `ppi` symlink that isn't ours.
   if (existing !== null && isLink) {
-    const bak = `${ppiPath}.orig.bak`;
-    if (!existsSync(bak)) {
-      renameSync(ppiPath, bak);
-      backedUp = bak;
-      log(`Backed up existing ppi -> ${bak}`);
+    try {
+      unlinkSync(ppiPath);
+    } catch (err) {
+      return {
+        status: "error",
+        path: ppiPath,
+        error: `Could not replace ${ppiPath}: ${err?.message ?? err}`,
+      };
     }
   }
 
   symlinkSync(target, ppiPath, "file");
   log(`Linked ${ppiPath} -> ${target}`);
-  return { status: backedUp ? "backedUpLink" : "linked", path: ppiPath, backedUp };
+  return { status: "linked", path: ppiPath };
 }
 
 /** Full setup: resolve pi-profiles and (optionally) create the ppi shim. */

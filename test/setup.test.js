@@ -56,7 +56,7 @@ test("ensurePiProfiles symlinks a global copy into a bare project", () => {
   assert.equal(r2.status, "ok");
 });
 
-test("ensurePpiShim creates a ppi link, backing up an existing one", () => {
+test("ensurePpiShim creates a ppi link and replaces an existing one", () => {
   const bin = join(root, "bin");
   mkdirSync(bin, { recursive: true });
   const target = join(root, "bin", "ppi-tui.js");
@@ -71,13 +71,13 @@ test("ensurePpiShim creates a ppi link, backing up an existing one", () => {
   const r2 = ensurePpiShim(bin, target, { log: () => {} });
   assert.equal(r2.status, "ok");
 
-  // another tool occupies `ppi` -> it is backed up and replaced
+  // another tool occupies `ppi` -> it is replaced, no .bak left behind
   writeFileSync(join(bin, "ppitarget"), "#!/usr/bin/env node\n");
   rmSync(join(bin, "ppi"));
   symlinkOrFile(join(bin, "ppi"), join(bin, "ppitarget"));
   const r3 = ensurePpiShim(bin, target, { log: () => {} });
-  assert.equal(r3.status, "backedUpLink");
-  assert.ok(existsSync(join(bin, "ppi.orig.bak")));
+  assert.equal(r3.status, "linked");
+  assert.ok(!existsSync(join(bin, "ppi.orig.bak")), "no backup clutter");
   assert.equal(readlinkSync(join(bin, "ppi")), target);
 });
 

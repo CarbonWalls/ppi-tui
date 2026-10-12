@@ -413,7 +413,6 @@ function printSetupResult(r) {
       process.exitCode = 1;
     } else {
       console.log(`Created the \`ppi\` command -> ${r.shim.path}`);
-      if (r.shim.backedUp) console.log(`(previous ppi saved as ${r.shim.backedUp})`);
     }
   }
   console.log("\nDone. Run `ppi --version` to confirm.");

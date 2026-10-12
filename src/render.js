@@ -30,6 +30,13 @@ const C = {
 export const MIN_HEIGHT = 10;
 export const MIN_WIDTH = 44;
 
+// Never paint a character into the terminal's absolute last column. A line
+// that runs right up to column `width` makes terminals autowrap the cursor
+// (shifting the whole frame one row on every redraw) or drop the final glyph —
+// which is what made the "0" of the version tag flicker on refresh. Every
+// layout decision uses `width - RIGHT_MARGIN`, so the last column stays blank.
+export const RIGHT_MARGIN = 1;
+
 /** Rows available for the profile list, mirroring renderFrame's layout. */
 export function bodyHeight(state, height) {
   return Math.max(0, height - 2 /* header */ - 1 /* footer */ - (state.status ? 1 : 0));
@@ -55,21 +62,26 @@ export function renderFrame(state, ctx) {
   }
 
   const lines = [];
-  lines.push(renderTitle(state, ctx));
-  lines.push(renderSubtitle(state, ctx));
+
+  // All layout happens inside the safe area; the rightmost column is left
+  // untouched so edge characters can never autowrap or be dropped on redraw.
+  const safe = { ...ctx, width: Math.max(1, width - RIGHT_MARGIN) };
+
+  lines.push(renderTitle(state, safe));
+  lines.push(renderSubtitle(state, safe));
 
   const headerH = 2;
   const footerH = 1;
   const statusH = state.status ? 1 : 0;
   const bodyH = height - headerH - footerH - statusH;
 
-  lines.push(...renderBody(state, { ...ctx, bodyH }));
-  lines.push(renderFooter(state, ctx));
-  if (state.status) lines.push(renderStatus(state, ctx));
+  lines.push(...renderBody(state, { ...safe, bodyH }));
+  lines.push(renderFooter(state, safe));
+  if (state.status) lines.push(renderStatus(state, safe));
 
   // Modals overlay the body region, drawn last.
   if (state.modal) {
-    const overlay = renderModal(state, ctx);
+    const overlay = renderModal(state, safe);
     if (overlay) {
       const { top, rows } = overlay;
       for (let i = 0; i < rows.length; i++) {

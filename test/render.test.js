@@ -1,8 +1,8 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { createPainter } from "../src/term.js";
-import { renderFrame } from "../src/render.js";
-import { stripAnsi } from "../src/strutil.js";
+import { renderFrame, RIGHT_MARGIN } from "../src/render.js";
+import { stripAnsi, visibleWidth } from "../src/strutil.js";
 
 // No-colour painter: every style transform is the identity, so assertions can
 // be made on visible text. Any stray escape is still stripped for safety.
@@ -47,6 +47,27 @@ function fakeProfile(name, over = {}) {
 function stateFor(profiles, over = {}) {
   return { profiles, selected: 0, offset: 0, modal: null, status: null, currentDir: null, ...over };
 }
+
+test("never paints a character into the terminal's last column", () => {
+  // Regression: the title bar used to run right up to column `width`, so the
+  // "0" of the version sat on the absolute last column and flickered on every
+  // redraw (terminals autowrap the cursor or drop the edge glyph).
+  for (const width of [44, 60, 90, 160]) {
+    for (const height of [10, 24, 40]) {
+      const withStatus = stateFor([fakeProfile("work")], { status: { text: "Refreshed", kind: "info" } });
+      const states = [stateFor([fakeProfile("work"), fakeProfile("play")]), withStatus];
+      for (const st of states) {
+        const rows = renderFrame(st, { width, height, painter, meta: { version: "9.9.9", rootLabel: "~/.pi", agentDirLabel: "~/.pi/agent" } });
+        for (let i = 0; i < rows.length; i++) {
+          assert.ok(
+            visibleWidth(rows[i]) <= width - RIGHT_MARGIN,
+            `row ${i} at ${width}x${height} touches the right edge`,
+          );
+        }
+      }
+    }
+  }
+});
 
 test("renders a header with the title, profile count and root", () => {
   const lines = frame(stateFor([fakeProfile("work"), fakeProfile("play")]));
